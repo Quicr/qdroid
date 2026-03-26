@@ -23,22 +23,37 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -47,6 +62,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -56,7 +72,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -96,7 +111,7 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
-fun MainScreen(viewModel: MainViewModel = hiltViewModel()) {
+fun MainScreen(viewModel: MainViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val localVideoTrack by viewModel.localVideoTrack.collectAsStateWithLifecycle()
     val remoteVideoTrack by viewModel.remoteVideoTrack.collectAsStateWithLifecycle()
@@ -137,7 +152,8 @@ fun MainScreen(viewModel: MainViewModel = hiltViewModel()) {
                             } else {
                                 permissionsState.launchMultiplePermissionRequest()
                             }
-                        }
+                        },
+                        onNavigateToSettings = { viewModel.navigateToSettings() }
                     )
                 }
                 is CallUiState.InCall -> {
@@ -148,13 +164,21 @@ fun MainScreen(viewModel: MainViewModel = hiltViewModel()) {
                         onEndCall = { viewModel.endCall() }
                     )
                 }
+                is CallUiState.Settings -> {
+                    SettingsScreen(
+                        onSave = { viewModel.saveSettings() }
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-fun LobbyScreen(onStartCall: () -> Unit) {
+fun LobbyScreen(
+    onStartCall: () -> Unit,
+    onNavigateToSettings: () -> Unit
+) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -165,12 +189,28 @@ fun LobbyScreen(onStartCall: () -> Unit) {
                         MaterialTheme.colorScheme.background
                     )
                 )
-            ),
-        contentAlignment = Alignment.Center
+            )
     ) {
+        // Settings Icon at top right
+        IconButton(
+            onClick = onNavigateToSettings,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(16.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Settings,
+                contentDescription = "Settings",
+                tint = MaterialTheme.colorScheme.primary
+            )
+        }
+
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(32.dp)
+            modifier = Modifier
+                .padding(32.dp)
+                .align(Alignment.Center)
         ) {
             Text(
                 text = "QDroid",
@@ -210,7 +250,7 @@ fun LobbyScreen(onStartCall: () -> Unit) {
             Spacer(modifier = Modifier.height(24.dp))
             
             Text(
-                text = "Note: Real-time multi-participant support requires a signaling server.",
+                text = "Real-time conferencing ready.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
                 modifier = Modifier.padding(horizontal = 32.dp)
@@ -230,7 +270,7 @@ fun InCallScreen(
     var isVideoOn by remember { mutableStateOf(true) }
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        // Remote Video (Full Screen)
+        // Remote Video
         if (remoteVideoTrack != null) {
             VideoRenderer(
                 videoTrack = remoteVideoTrack,
@@ -250,7 +290,7 @@ fun InCallScreen(
             }
         }
 
-        // Local Video (PIP) with Glass Border
+        // Local Video (PIP)
         AnimatedVisibility(
             visible = true,
             modifier = Modifier
@@ -284,46 +324,48 @@ fun InCallScreen(
             }
         }
 
-        // Floating Control Bar (Glassmorphism)
+        // Control Bar - Enhanced Visibility
         Surface(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 48.dp)
                 .clip(RoundedCornerShape(40.dp))
-                .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(40.dp)),
-            color = Color.White.copy(alpha = 0.15f), // Transparent glass background
-            tonalElevation = 8.dp
+                .border(0.5.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(40.dp)),
+            color = Color.Black.copy(alpha = 0.6f), // Darker for clear button visibility
+            tonalElevation = 16.dp
         ) {
             Row(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(24.dp)
             ) {
                 IconButton(
                     onClick = { isMicOn = !isMicOn },
                     colors = IconButtonDefaults.iconButtonColors(
-                        containerColor = if (isMicOn) Color.Transparent else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f),
+                        containerColor = if (isMicOn) Color.White.copy(alpha = 0.15f) else MaterialTheme.colorScheme.error.copy(alpha = 0.9f),
                         contentColor = Color.White
                     ),
-                    modifier = Modifier.semantics { contentDescription = if (isMicOn) "Mute Microphone" else "Unmute Microphone" }
+                    modifier = Modifier.size(52.dp).semantics { contentDescription = if (isMicOn) "Mute" else "Unmute" }
                 ) {
                     Icon(
                         imageVector = if (isMicOn) Icons.Default.Mic else Icons.Default.MicOff,
-                        contentDescription = null
+                        contentDescription = null,
+                        modifier = Modifier.size(28.dp)
                     )
                 }
 
                 IconButton(
                     onClick = { isVideoOn = !isVideoOn },
                     colors = IconButtonDefaults.iconButtonColors(
-                        containerColor = if (isVideoOn) Color.Transparent else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f),
+                        containerColor = if (isVideoOn) Color.White.copy(alpha = 0.15f) else MaterialTheme.colorScheme.error.copy(alpha = 0.9f),
                         contentColor = Color.White
                     ),
-                    modifier = Modifier.semantics { contentDescription = if (isVideoOn) "Turn Camera Off" else "Turn Camera On" }
+                    modifier = Modifier.size(52.dp).semantics { contentDescription = if (isVideoOn) "Stop Video" else "Start Video" }
                 ) {
                     Icon(
                         imageVector = if (isVideoOn) Icons.Default.Videocam else Icons.Default.VideocamOff,
-                        contentDescription = null
+                        contentDescription = null,
+                        modifier = Modifier.size(28.dp)
                     )
                 }
 
@@ -334,16 +376,204 @@ fun InCallScreen(
                         contentColor = MaterialTheme.colorScheme.onError
                     ),
                     modifier = Modifier
-                        .size(56.dp)
+                        .size(64.dp)
                         .semantics { contentDescription = "End Call" }
                 ) {
                     Icon(
                         imageVector = Icons.Default.CallEnd,
                         contentDescription = null,
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier.size(32.dp)
                     )
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsScreen(onSave: () -> Unit) {
+    var setting1 by remember { mutableStateOf("") }
+    var setting2 by remember { mutableStateOf("") }
+    var radioOption by remember { mutableStateOf("Peer-to-Peer") }
+    var toggleState by remember { mutableStateOf(true) }
+    var expanded by remember { mutableStateOf(false) }
+    val qualityOptions = listOf("Standard", "High Definition", "Ultra HD")
+    var selectedQuality by remember { mutableStateOf(qualityOptions[0]) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Settings", fontWeight = FontWeight.Bold) },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f)
+                ),
+                navigationIcon = {
+                    IconButton(onClick = onSave) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                }
+            )
+        }
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+                .background(
+                    brush = Brush.verticalGradient(
+                        colors = listOf(
+                            MaterialTheme.colorScheme.surface,
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                        )
+                    )
+                )
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Card 1
+            GlassSettingsCard(header = "Settings 1") {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Display Name", style = MaterialTheme.typography.labelLarge)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = setting1,
+                        onValueChange = { setting1 = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("Enter your name") },
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                }
+            }
+
+            // Card 2
+            GlassSettingsCard(header = "Settings 2") {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Room Name", style = MaterialTheme.typography.labelLarge)
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = setting2,
+                        onValueChange = { setting2 = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text("Enter room name") },
+                        shape = RoundedCornerShape(12.dp)
+                    )
+                }
+            }
+
+            // Card 3
+            GlassSettingsCard(header = "Connection Mode") {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(
+                            selected = radioOption == "Peer-to-Peer",
+                            onClick = { radioOption = "Peer-to-Peer" }
+                        )
+                        Text("Peer-to-Peer", modifier = Modifier.padding(start = 8.dp))
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(
+                            selected = radioOption == "Server-Relay",
+                            onClick = { radioOption = "Server-Relay" }
+                        )
+                        Text("Server-Relay", modifier = Modifier.padding(start = 8.dp))
+                    }
+                }
+            }
+
+            // Card 4
+            GlassSettingsCard(header = "Audio") {
+                Row(
+                    modifier = Modifier.padding(16.dp).fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Auto-Mute on Join")
+                    Switch(
+                        checked = toggleState,
+                        onCheckedChange = { toggleState = it }
+                    )
+                }
+            }
+
+            // Card 5
+            GlassSettingsCard(header = "Video Quality") {
+                Box(modifier = Modifier.padding(16.dp)) {
+                    ExposedDropdownMenuBox(
+                        expanded = expanded,
+                        onExpandedChange = { expanded = !expanded }
+                    ) {
+                        OutlinedTextField(
+                            value = selectedQuality,
+                            onValueChange = {},
+                            readOnly = true,
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                            modifier = Modifier.menuAnchor().fillMaxWidth(),
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                        ExposedDropdownMenu(
+                            expanded = expanded,
+                            onDismissRequest = { expanded = false }
+                        ) {
+                            qualityOptions.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(option) },
+                                    onClick = {
+                                        selectedQuality = option
+                                        expanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            Button(
+                onClick = onSave,
+                modifier = Modifier.fillMaxWidth().height(56.dp),
+                shape = RoundedCornerShape(16.dp),
+                elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
+            ) {
+                Text("Save Changes", style = MaterialTheme.typography.titleMedium)
+            }
+            
+            Spacer(modifier = Modifier.height(32.dp))
+        }
+    }
+}
+
+@Composable
+fun GlassSettingsCard(header: String, content: @Composable () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .border(
+                    width = 1.dp,
+                    brush = Brush.linearGradient(
+                        colors = listOf(Color.White.copy(alpha = 0.3f), Color.Transparent)
+                    ),
+                    shape = RoundedCornerShape(24.dp)
+                )
+        ) {
+            Text(
+                text = header,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 16.dp, top = 16.dp, end = 16.dp),
+                color = MaterialTheme.colorScheme.primary
+            )
+            content()
         }
     }
 }

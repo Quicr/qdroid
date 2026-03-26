@@ -35,6 +35,15 @@ class MainViewModel @Inject constructor(
         _uiState.value = CallUiState.Lobby
     }
 
+    fun navigateToSettings() {
+        _uiState.value = CallUiState.Settings
+    }
+
+    fun saveSettings() {
+        // Logic to save settings can be added here
+        _uiState.value = CallUiState.Lobby
+    }
+
     fun onStart() {
         if (_uiState.value is CallUiState.InCall) {
             webRtcSessionManager.startVideo()
@@ -56,4 +65,5 @@ class MainViewModel @Inject constructor(
 sealed class CallUiState {
     object Lobby : CallUiState()
     object InCall : CallUiState()
+    object Settings : CallUiState()
 }
