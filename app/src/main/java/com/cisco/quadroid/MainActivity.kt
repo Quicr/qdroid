@@ -1,6 +1,7 @@
 package com.cisco.quadroid
 
 import android.Manifest
+import android.content.res.Configuration
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -9,8 +10,12 @@ import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,9 +30,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -62,6 +64,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -70,6 +73,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -122,6 +126,8 @@ fun MainScreen(viewModel: MainViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val localVideoTrack by viewModel.localVideoTrack.collectAsStateWithLifecycle()
     val remoteVideoTracks by viewModel.remoteVideoTracks.collectAsStateWithLifecycle()
+    val isMicEnabled by viewModel.isMicEnabled.collectAsStateWithLifecycle()
+    val isVideoEnabled by viewModel.isVideoEnabled.collectAsStateWithLifecycle()
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -167,8 +173,12 @@ fun MainScreen(viewModel: MainViewModel) {
                     InCallScreen(
                         localVideoTrack = localVideoTrack,
                         remoteVideoTracks = remoteVideoTracks,
+                        isMicEnabled = isMicEnabled,
+                        isVideoEnabled = isVideoEnabled,
                         eglBaseContext = viewModel.getEglBaseContext(),
                         onSimulateParticipant = { viewModel.simulateParticipant() },
+                        onToggleVideo = { viewModel.toggleVideo() },
+                        onToggleAudio = { viewModel.toggleAudio() },
                         onEndCall = { viewModel.endCall() }
                     )
                 }
@@ -261,13 +271,19 @@ fun LobbyScreen(
 fun InCallScreen(
     localVideoTrack: VideoTrack?,
     remoteVideoTracks: List<VideoTrack>,
+    isMicEnabled: Boolean,
+    isVideoEnabled: Boolean,
     eglBaseContext: EglBase.Context,
     onSimulateParticipant: () -> Unit,
+    onToggleVideo: () -> Unit,
+    onToggleAudio: () -> Unit,
     onEndCall: () -> Unit
 ) {
-    var isMicOn by remember { mutableStateOf(true) }
-    var isVideoOn by remember { mutableStateOf(true) }
     var showLocalPip by remember { mutableStateOf(true) }
+    var showControls by remember { mutableStateOf(true) }
+    
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     LaunchedEffect(remoteVideoTracks.size) {
         if (remoteVideoTracks.isNotEmpty()) {
@@ -278,30 +294,28 @@ fun InCallScreen(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        // 1. Remote Grid (Bottom Layer)
-        if (remoteVideoTracks.isNotEmpty()) {
-            val columns = if (remoteVideoTracks.size > 1) 2 else 1
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(columns),
-                modifier = Modifier.fillMaxSize(),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
             ) {
-                items(remoteVideoTracks) { track ->
-                    VideoRenderer(
-                        videoTrack = track,
-                        eglBaseContext = eglBaseContext,
-                        modifier = Modifier.fillMaxHeight().aspectRatio(if (columns == 1) 0.7f else 1f)
-                    )
-                }
+                showControls = !showControls
             }
-        } else {
-            localVideoTrack?.let {
-                VideoRenderer(
-                    videoTrack = it,
+    ) {
+        // 1. Remote Participants - Partitioned to fill screen
+        Box(modifier = Modifier.fillMaxSize()) {
+            if (remoteVideoTracks.isEmpty()) {
+                localVideoTrack?.let {
+                    VideoRenderer(videoTrack = it, eglBaseContext = eglBaseContext, modifier = Modifier.fillMaxSize())
+                }
+            } else {
+                AdaptiveRemoteGrid(
+                    tracks = remoteVideoTracks,
                     eglBaseContext = eglBaseContext,
-                    modifier = Modifier.fillMaxSize()
+                    isLandscape = isLandscape
                 )
             }
         }
@@ -313,80 +327,140 @@ fun InCallScreen(
                 .align(Alignment.TopEnd)
                 .statusBarsPadding()
                 .padding(16.dp)
-                .zIndex(1f), // Ensure PIP is above the grid
+                .zIndex(1f),
             enter = fadeIn(),
             exit = fadeOut()
         ) {
             Box(
                 modifier = Modifier
-                    .size(100.dp, 150.dp)
+                    .size(if (isLandscape) 140.dp else 100.dp, if (isLandscape) 90.dp else 150.dp)
                     .clip(RoundedCornerShape(16.dp))
                     .border(1.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
                     .background(Color.Black.copy(alpha = 0.2f))
             ) {
-                localVideoTrack?.let {
+                if (localVideoTrack != null && isVideoEnabled) {
                     VideoRenderer(
-                        videoTrack = it,
+                        videoTrack = localVideoTrack,
                         eglBaseContext = eglBaseContext,
                         modifier = Modifier.fillMaxSize(),
-                        zOrderMediaOverlay = true // Required for native views to overlap correctly
+                        zOrderMediaOverlay = true
                     )
+                } else {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Default.VideocamOff, contentDescription = null, tint = Color.White.copy(alpha = 0.5f))
+                    }
                 }
             }
         }
 
-        // 3. Control Bar (Top-most Layer)
-        Surface(
+        // 3. Floating Control Bar (Over video)
+        AnimatedVisibility(
+            visible = showControls,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 48.dp)
-                .clip(RoundedCornerShape(40.dp))
-                .border(0.5.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(40.dp))
-                .zIndex(2f), // Top layer
-            color = Color.Black.copy(alpha = 0.7f),
-            tonalElevation = 16.dp
+                .zIndex(2f)
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(20.dp)
+            Surface(
+                modifier = Modifier
+                    .padding(bottom = 48.dp)
+                    .clip(RoundedCornerShape(40.dp))
+                    .border(0.5.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(40.dp)),
+                color = Color.Black.copy(alpha = 0.7f),
+                tonalElevation = 16.dp
             ) {
-                IconButton(
-                    onClick = onSimulateParticipant,
-                    colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)
+                Row(
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(20.dp)
                 ) {
-                    Icon(Icons.Default.PersonAdd, contentDescription = "Add Simulation")
-                }
+                    IconButton(
+                        onClick = onSimulateParticipant,
+                        colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)
+                    ) {
+                        Icon(Icons.Default.PersonAdd, contentDescription = "Add Simulation")
+                    }
 
-                IconButton(
-                    onClick = { isMicOn = !isMicOn },
-                    colors = IconButtonDefaults.iconButtonColors(
-                        containerColor = if (isMicOn) Color.White.copy(alpha = 0.1f) else MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
-                        contentColor = Color.White
-                    )
-                ) {
-                    Icon(imageVector = if (isMicOn) Icons.Default.Mic else Icons.Default.MicOff, contentDescription = null)
-                }
+                    IconButton(
+                        onClick = onToggleAudio,
+                        colors = IconButtonDefaults.iconButtonColors(
+                            containerColor = if (isMicEnabled) Color.White.copy(alpha = 0.1f) else MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
+                            contentColor = Color.White
+                        )
+                    ) {
+                        Icon(imageVector = if (isMicEnabled) Icons.Default.Mic else Icons.Default.MicOff, contentDescription = null)
+                    }
 
-                IconButton(
-                    onClick = { isVideoOn = !isVideoOn },
-                    colors = IconButtonDefaults.iconButtonColors(
-                        containerColor = if (isVideoOn) Color.White.copy(alpha = 0.1f) else MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
-                        contentColor = Color.White
-                    )
-                ) {
-                    Icon(imageVector = if (isVideoOn) Icons.Default.Videocam else Icons.Default.VideocamOff, contentDescription = null)
-                }
+                    IconButton(
+                        onClick = onToggleVideo,
+                        colors = IconButtonDefaults.iconButtonColors(
+                            containerColor = if (isVideoEnabled) Color.White.copy(alpha = 0.1f) else MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
+                            contentColor = Color.White
+                        )
+                    ) {
+                        Icon(imageVector = if (isVideoEnabled) Icons.Default.Videocam else Icons.Default.VideocamOff, contentDescription = null)
+                    }
 
-                IconButton(
-                    onClick = onEndCall,
-                    colors = IconButtonDefaults.iconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = Color.White
-                    ),
-                    modifier = Modifier.size(56.dp)
-                ) {
-                    Icon(imageVector = Icons.Default.CallEnd, contentDescription = null, modifier = Modifier.size(28.dp))
+                    IconButton(
+                        onClick = onEndCall,
+                        colors = IconButtonDefaults.iconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = Color.White
+                        ),
+                        modifier = Modifier.size(56.dp)
+                    ) {
+                        Icon(imageVector = Icons.Default.CallEnd, contentDescription = null, modifier = Modifier.size(28.dp))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun AdaptiveRemoteGrid(
+    tracks: List<VideoTrack>,
+    eglBaseContext: EglBase.Context,
+    isLandscape: Boolean
+) {
+    if (isLandscape) {
+        Row(modifier = Modifier.fillMaxSize()) {
+            tracks.forEach { track ->
+                key(track.id()) {
+                    Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                        VideoRenderer(videoTrack = track, eglBaseContext = eglBaseContext, modifier = Modifier.fillMaxSize())
+                    }
+                }
+            }
+        }
+    } else {
+        Column(modifier = Modifier.fillMaxSize()) {
+            when (tracks.size) {
+                1 -> {
+                    VideoRenderer(videoTrack = tracks[0], eglBaseContext = eglBaseContext, modifier = Modifier.fillMaxSize())
+                }
+                2 -> {
+                    tracks.forEach { track ->
+                        key(track.id()) {
+                            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                                VideoRenderer(videoTrack = track, eglBaseContext = eglBaseContext, modifier = Modifier.fillMaxSize())
+                            }
+                        }
+                    }
+                }
+                else -> {
+                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        VideoRenderer(videoTrack = tracks[0], eglBaseContext = eglBaseContext, modifier = Modifier.fillMaxSize())
+                    }
+                    Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                            VideoRenderer(videoTrack = tracks[1], eglBaseContext = eglBaseContext, modifier = Modifier.fillMaxSize())
+                        }
+                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                            VideoRenderer(videoTrack = tracks[2], eglBaseContext = eglBaseContext, modifier = Modifier.fillMaxSize())
+                        }
+                    }
                 }
             }
         }

@@ -89,13 +89,19 @@ class WebRtcSessionManager @Inject constructor(
     }
 
     fun simulateRemoteParticipant() {
-        // In a real app, this track would come from the signaling server and PeerConnection.Observer
-        // For grid UI demonstration, we reuse the local track as a "remote" one if it exists
         localVideoTrack.value?.let { track ->
             if (_remoteVideoTracks.value.size < 3) {
                 _remoteVideoTracks.value = _remoteVideoTracks.value + track
             }
         }
+    }
+
+    fun enableVideo(enabled: Boolean) {
+        _localVideoTrack.value?.setEnabled(enabled)
+    }
+
+    fun enableAudio(enabled: Boolean) {
+        localAudioTrack?.setEnabled(enabled)
     }
 
     fun startVideo() {
