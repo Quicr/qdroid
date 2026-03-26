@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -23,6 +25,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -31,11 +36,11 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenuItem
@@ -53,16 +58,15 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -72,6 +76,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -80,6 +86,7 @@ import com.cisco.quadroid.ui.theme.QuadroidTheme
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.delay
 import org.webrtc.EglBase
 import org.webrtc.VideoTrack
 
@@ -114,7 +121,7 @@ class MainActivity : ComponentActivity() {
 fun MainScreen(viewModel: MainViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val localVideoTrack by viewModel.localVideoTrack.collectAsStateWithLifecycle()
-    val remoteVideoTrack by viewModel.remoteVideoTrack.collectAsStateWithLifecycle()
+    val remoteVideoTracks by viewModel.remoteVideoTracks.collectAsStateWithLifecycle()
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -159,8 +166,9 @@ fun MainScreen(viewModel: MainViewModel) {
                 is CallUiState.InCall -> {
                     InCallScreen(
                         localVideoTrack = localVideoTrack,
-                        remoteVideoTrack = remoteVideoTrack,
+                        remoteVideoTracks = remoteVideoTracks,
                         eglBaseContext = viewModel.getEglBaseContext(),
+                        onSimulateParticipant = { viewModel.simulateParticipant() },
                         onEndCall = { viewModel.endCall() }
                     )
                 }
@@ -191,7 +199,6 @@ fun LobbyScreen(
                 )
             )
     ) {
-        // Settings Icon at top right
         IconButton(
             onClick = onNavigateToSettings,
             modifier = Modifier
@@ -246,15 +253,6 @@ fun LobbyScreen(
                     }
                 }
             }
-            
-            Spacer(modifier = Modifier.height(24.dp))
-            
-            Text(
-                text = "Real-time conferencing ready.",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                modifier = Modifier.padding(horizontal = 32.dp)
-            )
         }
     }
 }
@@ -262,135 +260,139 @@ fun LobbyScreen(
 @Composable
 fun InCallScreen(
     localVideoTrack: VideoTrack?,
-    remoteVideoTrack: VideoTrack?,
+    remoteVideoTracks: List<VideoTrack>,
     eglBaseContext: EglBase.Context,
+    onSimulateParticipant: () -> Unit,
     onEndCall: () -> Unit
 ) {
     var isMicOn by remember { mutableStateOf(true) }
     var isVideoOn by remember { mutableStateOf(true) }
+    var showLocalPip by remember { mutableStateOf(true) }
+
+    LaunchedEffect(remoteVideoTracks.size) {
+        if (remoteVideoTracks.isNotEmpty()) {
+            delay(5000)
+            showLocalPip = false
+        } else {
+            showLocalPip = true
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        // Remote Video
-        if (remoteVideoTrack != null) {
-            VideoRenderer(
-                videoTrack = remoteVideoTrack,
-                eglBaseContext = eglBaseContext,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
-            Box(
+        // 1. Remote Grid (Bottom Layer)
+        if (remoteVideoTracks.isNotEmpty()) {
+            val columns = if (remoteVideoTracks.size > 1) 2 else 1
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(columns),
                 modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
-                Text(
-                    text = "Waiting for participants...",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White.copy(alpha = 0.5f)
+                items(remoteVideoTracks) { track ->
+                    VideoRenderer(
+                        videoTrack = track,
+                        eglBaseContext = eglBaseContext,
+                        modifier = Modifier.fillMaxHeight().aspectRatio(if (columns == 1) 0.7f else 1f)
+                    )
+                }
+            }
+        } else {
+            localVideoTrack?.let {
+                VideoRenderer(
+                    videoTrack = it,
+                    eglBaseContext = eglBaseContext,
+                    modifier = Modifier.fillMaxSize()
                 )
             }
         }
 
-        // Local Video (PIP)
+        // 2. Local PIP (Top Layer)
         AnimatedVisibility(
-            visible = true,
+            visible = showLocalPip && remoteVideoTracks.isNotEmpty(),
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .statusBarsPadding()
-                .padding(20.dp),
+                .padding(16.dp)
+                .zIndex(1f), // Ensure PIP is above the grid
             enter = fadeIn(),
             exit = fadeOut()
         ) {
             Box(
                 modifier = Modifier
-                    .size(110.dp, 160.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(20.dp))
-                    .background(Color.White.copy(alpha = 0.1f))
+                    .size(100.dp, 150.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .border(1.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+                    .background(Color.Black.copy(alpha = 0.2f))
             ) {
-                if (localVideoTrack != null && isVideoOn) {
+                localVideoTrack?.let {
                     VideoRenderer(
-                        videoTrack = localVideoTrack,
+                        videoTrack = it,
                         eglBaseContext = eglBaseContext,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.VideocamOff,
-                        contentDescription = "Camera is off",
-                        tint = Color.White.copy(alpha = 0.3f),
-                        modifier = Modifier.align(Alignment.Center).size(24.dp)
+                        modifier = Modifier.fillMaxSize(),
+                        zOrderMediaOverlay = true // Required for native views to overlap correctly
                     )
                 }
             }
         }
 
-        // Control Bar - Enhanced Visibility
+        // 3. Control Bar (Top-most Layer)
         Surface(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 48.dp)
                 .clip(RoundedCornerShape(40.dp))
-                .border(0.5.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(40.dp)),
-            color = Color.Black.copy(alpha = 0.6f), // Darker for clear button visibility
+                .border(0.5.dp, Color.White.copy(alpha = 0.3f), RoundedCornerShape(40.dp))
+                .zIndex(2f), // Top layer
+            color = Color.Black.copy(alpha = 0.7f),
             tonalElevation = 16.dp
         ) {
             Row(
-                modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(24.dp)
+                horizontalArrangement = Arrangement.spacedBy(20.dp)
             ) {
+                IconButton(
+                    onClick = onSimulateParticipant,
+                    colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)
+                ) {
+                    Icon(Icons.Default.PersonAdd, contentDescription = "Add Simulation")
+                }
+
                 IconButton(
                     onClick = { isMicOn = !isMicOn },
                     colors = IconButtonDefaults.iconButtonColors(
-                        containerColor = if (isMicOn) Color.White.copy(alpha = 0.15f) else MaterialTheme.colorScheme.error.copy(alpha = 0.9f),
+                        containerColor = if (isMicOn) Color.White.copy(alpha = 0.1f) else MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
                         contentColor = Color.White
-                    ),
-                    modifier = Modifier.size(52.dp).semantics { contentDescription = if (isMicOn) "Mute" else "Unmute" }
-                ) {
-                    Icon(
-                        imageVector = if (isMicOn) Icons.Default.Mic else Icons.Default.MicOff,
-                        contentDescription = null,
-                        modifier = Modifier.size(28.dp)
                     )
+                ) {
+                    Icon(imageVector = if (isMicOn) Icons.Default.Mic else Icons.Default.MicOff, contentDescription = null)
                 }
 
                 IconButton(
                     onClick = { isVideoOn = !isVideoOn },
                     colors = IconButtonDefaults.iconButtonColors(
-                        containerColor = if (isVideoOn) Color.White.copy(alpha = 0.15f) else MaterialTheme.colorScheme.error.copy(alpha = 0.9f),
+                        containerColor = if (isVideoOn) Color.White.copy(alpha = 0.1f) else MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
                         contentColor = Color.White
-                    ),
-                    modifier = Modifier.size(52.dp).semantics { contentDescription = if (isVideoOn) "Stop Video" else "Start Video" }
-                ) {
-                    Icon(
-                        imageVector = if (isVideoOn) Icons.Default.Videocam else Icons.Default.VideocamOff,
-                        contentDescription = null,
-                        modifier = Modifier.size(28.dp)
                     )
+                ) {
+                    Icon(imageVector = if (isVideoOn) Icons.Default.Videocam else Icons.Default.VideocamOff, contentDescription = null)
                 }
 
                 IconButton(
                     onClick = onEndCall,
                     colors = IconButtonDefaults.iconButtonColors(
                         containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = MaterialTheme.colorScheme.onError
+                        contentColor = Color.White
                     ),
-                    modifier = Modifier
-                        .size(64.dp)
-                        .semantics { contentDescription = "End Call" }
+                    modifier = Modifier.size(56.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.CallEnd,
-                        contentDescription = null,
-                        modifier = Modifier.size(32.dp)
-                    )
+                    Icon(imageVector = Icons.Default.CallEnd, contentDescription = null, modifier = Modifier.size(28.dp))
                 }
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(onSave: () -> Unit) {
     var setting1 by remember { mutableStateOf("") }
@@ -403,11 +405,9 @@ fun SettingsScreen(onSave: () -> Unit) {
 
     Scaffold(
         topBar = {
+            @OptIn(ExperimentalMaterial3Api::class)
             TopAppBar(
                 title = { Text("Settings", fontWeight = FontWeight.Bold) },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f)
-                ),
                 navigationIcon = {
                     IconButton(onClick = onSave) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -420,193 +420,102 @@ fun SettingsScreen(onSave: () -> Unit) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .background(
-                    brush = Brush.verticalGradient(
-                        colors = listOf(
-                            MaterialTheme.colorScheme.surface,
-                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
-                        )
-                    )
-                )
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Card 1
-            GlassSettingsCard(header = "Settings 1") {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Display Name", style = MaterialTheme.typography.labelLarge)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = setting1,
-                        onValueChange = { setting1 = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text("Enter your name") },
-                        shape = RoundedCornerShape(12.dp)
-                    )
-                }
+            SettingsCardSection(header = "Settings 1") {
+                OutlinedTextField(
+                    value = setting1,
+                    onValueChange = { setting1 = it },
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    label = { Text("User Name") }
+                )
             }
 
-            // Card 2
-            GlassSettingsCard(header = "Settings 2") {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Room Name", style = MaterialTheme.typography.labelLarge)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = setting2,
-                        onValueChange = { setting2 = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text("Enter room name") },
-                        shape = RoundedCornerShape(12.dp)
-                    )
-                }
+            SettingsCardSection(header = "Settings 2") {
+                OutlinedTextField(
+                    value = setting2,
+                    onValueChange = { setting2 = it },
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    label = { Text("Meeting ID") }
+                )
             }
 
-            // Card 3
-            GlassSettingsCard(header = "Connection Mode") {
+            SettingsCardSection(header = "Connection") {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(
-                            selected = radioOption == "Peer-to-Peer",
-                            onClick = { radioOption = "Peer-to-Peer" }
-                        )
-                        Text("Peer-to-Peer", modifier = Modifier.padding(start = 8.dp))
+                        RadioButton(selected = radioOption == "Peer-to-Peer", onClick = { radioOption = "Peer-to-Peer" })
+                        Text("Peer-to-Peer")
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(
-                            selected = radioOption == "Server-Relay",
-                            onClick = { radioOption = "Server-Relay" }
-                        )
-                        Text("Server-Relay", modifier = Modifier.padding(start = 8.dp))
+                        RadioButton(selected = radioOption == "Server-Relay", onClick = { radioOption = "Server-Relay" })
+                        Text("Server-Relay")
                     }
                 }
             }
 
-            // Card 4
-            GlassSettingsCard(header = "Audio") {
+            SettingsCardSection(header = "Preferences") {
                 Row(
-                    modifier = Modifier.padding(16.dp).fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("Auto-Mute on Join")
-                    Switch(
-                        checked = toggleState,
-                        onCheckedChange = { toggleState = it }
-                    )
+                    Text("Noise Cancellation")
+                    Switch(checked = toggleState, onCheckedChange = { toggleState = it })
                 }
             }
 
-            // Card 5
-            GlassSettingsCard(header = "Video Quality") {
+            SettingsCardSection(header = "Quality") {
                 Box(modifier = Modifier.padding(16.dp)) {
-                    ExposedDropdownMenuBox(
-                        expanded = expanded,
-                        onExpandedChange = { expanded = !expanded }
-                    ) {
+                    @OptIn(ExperimentalMaterial3Api::class)
+                    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
                         OutlinedTextField(
                             value = selectedQuality,
                             onValueChange = {},
                             readOnly = true,
                             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                            modifier = Modifier.menuAnchor().fillMaxWidth(),
-                            shape = RoundedCornerShape(12.dp)
+                            modifier = Modifier.menuAnchor().fillMaxWidth()
                         )
-                        ExposedDropdownMenu(
-                            expanded = expanded,
-                            onDismissRequest = { expanded = false }
-                        ) {
+                        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
                             qualityOptions.forEach { option ->
-                                DropdownMenuItem(
-                                    text = { Text(option) },
-                                    onClick = {
-                                        selectedQuality = option
-                                        expanded = false
-                                    }
-                                )
+                                DropdownMenuItem(text = { Text(option) }, onClick = { selectedQuality = option; expanded = false })
                             }
                         }
                     }
                 }
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Button(
-                onClick = onSave,
-                modifier = Modifier.fillMaxWidth().height(56.dp),
-                shape = RoundedCornerShape(16.dp),
-                elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
-            ) {
-                Text("Save Changes", style = MaterialTheme.typography.titleMedium)
+            Button(onClick = onSave, modifier = Modifier.fillMaxWidth().height(56.dp)) {
+                Text("Save")
             }
-            
-            Spacer(modifier = Modifier.height(32.dp))
         }
     }
 }
 
 @Composable
-fun GlassSettingsCard(header: String, content: @Composable () -> Unit) {
+fun SettingsCardSection(header: String, content: @Composable () -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
     ) {
-        Column(
-            modifier = Modifier
-                .border(
-                    width = 1.dp,
-                    brush = Brush.linearGradient(
-                        colors = listOf(Color.White.copy(alpha = 0.3f), Color.Transparent)
-                    ),
-                    shape = RoundedCornerShape(24.dp)
-                )
-        ) {
-            Text(
-                text = header,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(start = 16.dp, top = 16.dp, end = 16.dp),
-                color = MaterialTheme.colorScheme.primary
-            )
+        Column {
+            Text(header, style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp), color = MaterialTheme.colorScheme.primary)
             content()
         }
     }
 }
 
 @Composable
-fun GlassCard(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    content: @Composable () -> Unit
-) {
+fun GlassCard(onClick: () -> Unit, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     Card(
         onClick = onClick,
         modifier = modifier,
         shape = RoundedCornerShape(32.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .border(
-                    width = 1.dp,
-                    brush = Brush.linearGradient(
-                        colors = listOf(
-                            Color.White.copy(alpha = 0.4f),
-                            Color.White.copy(alpha = 0.05f)
-                        )
-                    ),
-                    shape = RoundedCornerShape(32.dp)
-                )
-        ) {
+        Box(modifier = Modifier.fillMaxSize().border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(32.dp))) {
             content()
         }
     }

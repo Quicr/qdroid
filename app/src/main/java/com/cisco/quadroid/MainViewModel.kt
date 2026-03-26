@@ -19,7 +19,7 @@ class MainViewModel @Inject constructor(
     val uiState: StateFlow<CallUiState> = _uiState
 
     val localVideoTrack: StateFlow<VideoTrack?> = webRtcSessionManager.localVideoTrack
-    val remoteVideoTrack: StateFlow<VideoTrack?> = webRtcSessionManager.remoteVideoTrack
+    val remoteVideoTracks: StateFlow<List<VideoTrack>> = webRtcSessionManager.remoteVideoTracks
 
     fun getEglBaseContext() = webRtcSessionManager.getEglBaseContext()
 
@@ -28,6 +28,10 @@ class MainViewModel @Inject constructor(
             webRtcSessionManager.setupLocalStream()
             _uiState.value = CallUiState.InCall
         }
+    }
+
+    fun simulateParticipant() {
+        webRtcSessionManager.simulateRemoteParticipant()
     }
 
     fun endCall() {
@@ -40,7 +44,6 @@ class MainViewModel @Inject constructor(
     }
 
     fun saveSettings() {
-        // Logic to save settings can be added here
         _uiState.value = CallUiState.Lobby
     }
 

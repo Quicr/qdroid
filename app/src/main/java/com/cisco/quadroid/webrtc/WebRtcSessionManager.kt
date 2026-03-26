@@ -17,8 +17,8 @@ class WebRtcSessionManager @Inject constructor(
     private val _localVideoTrack = MutableStateFlow<VideoTrack?>(null)
     val localVideoTrack: StateFlow<VideoTrack?> = _localVideoTrack
 
-    private val _remoteVideoTrack = MutableStateFlow<VideoTrack?>(null)
-    val remoteVideoTrack: StateFlow<VideoTrack?> = _remoteVideoTrack
+    private val _remoteVideoTracks = MutableStateFlow<List<VideoTrack>>(emptyList())
+    val remoteVideoTracks: StateFlow<List<VideoTrack>> = _remoteVideoTracks
 
     private var peerConnectionFactory: PeerConnectionFactory? = null
     private var peerConnection: PeerConnection? = null
@@ -88,6 +88,16 @@ class WebRtcSessionManager @Inject constructor(
         return null
     }
 
+    fun simulateRemoteParticipant() {
+        // In a real app, this track would come from the signaling server and PeerConnection.Observer
+        // For grid UI demonstration, we reuse the local track as a "remote" one if it exists
+        localVideoTrack.value?.let { track ->
+            if (_remoteVideoTracks.value.size < 3) {
+                _remoteVideoTracks.value = _remoteVideoTracks.value + track
+            }
+        }
+    }
+
     fun startVideo() {
         videoCapturer?.startCapture(1280, 720, 30)
     }
@@ -97,9 +107,8 @@ class WebRtcSessionManager @Inject constructor(
     }
 
     fun disconnect() {
-        // Clear tracks first to signal UI to stop rendering
         _localVideoTrack.value = null
-        _remoteVideoTrack.value = null
+        _remoteVideoTracks.value = emptyList()
 
         try {
             videoCapturer?.stopCapture()
