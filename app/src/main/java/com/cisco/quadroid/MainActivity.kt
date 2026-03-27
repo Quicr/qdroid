@@ -3,10 +3,16 @@ package com.cisco.quadroid
 import android.Manifest
 import android.content.res.Configuration
 import android.os.Bundle
+import android.view.Surface
+import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.camera.core.Preview
+import androidx.camera.core.CameraSelector
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -21,7 +27,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -74,25 +79,25 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
-import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.cisco.quadroid.ui.components.VideoRenderer
+import com.cisco.quadroid.mediacodec.ParticipantStream
+import com.cisco.quadroid.ui.components.NativeVideoRenderer
 import com.cisco.quadroid.ui.theme.QuadroidTheme
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.delay
-import org.webrtc.EglBase
-import org.webrtc.VideoTrack
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -108,41 +113,17 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-
-    override fun onStart() {
-        super.onStart()
-        viewModel.onStart()
-    }
-
-    override fun onStop() {
-        super.onStop()
-        viewModel.onStop()
-    }
 }
 
 @OptIn(ExperimentalPermissionsApi::class)
 @Composable
 fun MainScreen(viewModel: MainViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-    val localVideoTrack by viewModel.localVideoTrack.collectAsStateWithLifecycle()
-    val remoteVideoTracks by viewModel.remoteVideoTracks.collectAsStateWithLifecycle()
+    val remoteParticipants by viewModel.remoteParticipants.collectAsStateWithLifecycle()
     val isMicEnabled by viewModel.isMicEnabled.collectAsStateWithLifecycle()
     val isVideoEnabled by viewModel.isVideoEnabled.collectAsStateWithLifecycle()
 
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_START -> viewModel.onStart()
-                Lifecycle.Event.ON_STOP -> viewModel.onStop()
-                else -> {}
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
-        }
-    }
 
     val permissionsState = rememberMultiplePermissionsState(
         permissions = listOf(
@@ -161,7 +142,7 @@ fun MainScreen(viewModel: MainViewModel) {
                     LobbyScreen(
                         onStartCall = {
                             if (permissionsState.allPermissionsGranted) {
-                                viewModel.startCall()
+                                viewModel.startCall(lifecycleOwner)
                             } else {
                                 permissionsState.launchMultiplePermissionRequest()
                             }
@@ -171,13 +152,14 @@ fun MainScreen(viewModel: MainViewModel) {
                 }
                 is CallUiState.InCall -> {
                     InCallScreen(
-                        localVideoTrack = localVideoTrack,
-                        remoteVideoTracks = remoteVideoTracks,
+                        remoteParticipants = remoteParticipants,
                         isMicEnabled = isMicEnabled,
                         isVideoEnabled = isVideoEnabled,
-                        eglBaseContext = viewModel.getEglBaseContext(),
+                        onRemoteSurfaceReady = { id, surface -> viewModel.onRemoteSurfaceReady(id, surface) },
                         onSimulateParticipant = { viewModel.simulateParticipant() },
-                        onToggleVideo = { viewModel.toggleVideo() },
+                        onToggleVideo = { viewModel.toggleVideo(
+
+                        ) },
                         onToggleAudio = { viewModel.toggleAudio() },
                         onEndCall = { viewModel.endCall() }
                     )
@@ -269,30 +251,20 @@ fun LobbyScreen(
 
 @Composable
 fun InCallScreen(
-    localVideoTrack: VideoTrack?,
-    remoteVideoTracks: List<VideoTrack>,
+    remoteParticipants: List<ParticipantStream>,
     isMicEnabled: Boolean,
     isVideoEnabled: Boolean,
-    eglBaseContext: EglBase.Context,
+    onRemoteSurfaceReady: (String, Surface) -> Unit,
     onSimulateParticipant: () -> Unit,
     onToggleVideo: () -> Unit,
     onToggleAudio: () -> Unit,
     onEndCall: () -> Unit
 ) {
-    var showLocalPip by remember { mutableStateOf(true) }
     var showControls by remember { mutableStateOf(true) }
     
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-
-    LaunchedEffect(remoteVideoTracks.size) {
-        if (remoteVideoTracks.isNotEmpty()) {
-            delay(5000)
-            showLocalPip = false
-        } else {
-            showLocalPip = true
-        }
-    }
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     Box(
         modifier = Modifier
@@ -302,58 +274,59 @@ fun InCallScreen(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
             ) {
-                showLocalPip = !showLocalPip
+                showControls = !showControls
             }
     ) {
-        // 1. Remote Participants - Partitioned to fill screen
+        // 1. Video Participants
         Box(modifier = Modifier.fillMaxSize()) {
-            if (remoteVideoTracks.isEmpty()) {
-                localVideoTrack?.let {
-                    VideoRenderer(videoTrack = it, eglBaseContext = eglBaseContext, modifier = Modifier.fillMaxSize())
+            if (remoteParticipants.isEmpty()) {
+                if (isVideoEnabled) {
+                    CameraPreview(lifecycleOwner = lifecycleOwner, modifier = Modifier.fillMaxSize())
+                } else {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Default.VideocamOff, contentDescription = null, tint = Color.White.copy(alpha = 0.5f), modifier = Modifier.size(64.dp))
+                    }
                 }
             } else {
-                AdaptiveRemoteGrid(
-                    tracks = remoteVideoTracks,
-                    eglBaseContext = eglBaseContext,
+                AdaptiveNativeGrid(
+                    participants = remoteParticipants,
+                    onSurfaceReady = onRemoteSurfaceReady,
                     isLandscape = isLandscape
                 )
             }
         }
 
-        // 2. Local PIP (Top Layer)
-        AnimatedVisibility(
-            visible = showLocalPip && remoteVideoTracks.isNotEmpty(),
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .statusBarsPadding()
-                .padding(16.dp)
-                .zIndex(1f),
-            enter = fadeIn(),
-            exit = fadeOut()
-        ) {
-            Box(
+        // 2. Local PIP
+        if (remoteParticipants.isNotEmpty()) {
+            AnimatedVisibility(
+                visible = showControls,
                 modifier = Modifier
-                    .size(if (isLandscape) 140.dp else 100.dp, if (isLandscape) 90.dp else 150.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .border(1.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
-                    .background(Color.Black.copy(alpha = 0.2f))
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(16.dp)
+                    .zIndex(1f),
+                enter = fadeIn(),
+                exit = fadeOut()
             ) {
-                if (localVideoTrack != null && isVideoEnabled) {
-                    VideoRenderer(
-                        videoTrack = localVideoTrack,
-                        eglBaseContext = eglBaseContext,
-                        modifier = Modifier.fillMaxSize(),
-                        zOrderMediaOverlay = true
-                    )
-                } else {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.VideocamOff, contentDescription = null, tint = Color.White.copy(alpha = 0.5f))
+                Box(
+                    modifier = Modifier
+                        .size(if (isLandscape) 140.dp else 100.dp, if (isLandscape) 90.dp else 150.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+                        .background(Color.Black.copy(alpha = 0.2f))
+                ) {
+                    if (isVideoEnabled) {
+                        CameraPreview(lifecycleOwner = lifecycleOwner, modifier = Modifier.fillMaxSize())
+                    } else {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.VideocamOff, contentDescription = null, tint = Color.White.copy(alpha = 0.5f))
+                        }
                     }
                 }
             }
         }
 
-        // 3. Floating Control Bar (Over video)
+        // 3. Floating Control Bar
         AnimatedVisibility(
             visible = showControls,
             enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
@@ -419,46 +392,98 @@ fun InCallScreen(
 }
 
 @Composable
-fun AdaptiveRemoteGrid(
-    tracks: List<VideoTrack>,
-    eglBaseContext: EglBase.Context,
+fun CameraPreview(
+    lifecycleOwner: LifecycleOwner,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val previewView = remember { PreviewView(context) }
+
+    LaunchedEffect(lifecycleOwner) {
+        val cameraProvider = ProcessCameraProvider.getInstance(context).get()
+        val preview = Preview.Builder().build().also {
+            it.setSurfaceProvider(previewView.surfaceProvider)
+        }
+        val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+
+        try {
+            cameraProvider.unbindAll()
+            cameraProvider.bindToLifecycle(
+                lifecycleOwner, cameraSelector, preview
+            )
+        } catch(exc: Exception) {
+            // Log error
+        }
+    }
+
+    AndroidView({ previewView }, modifier = modifier)
+}
+
+@Composable
+fun AdaptiveNativeGrid(
+    participants: List<ParticipantStream>,
+    onSurfaceReady: (String, Surface) -> Unit,
     isLandscape: Boolean
 ) {
     if (isLandscape) {
         Row(modifier = Modifier.fillMaxSize()) {
-            tracks.forEach { track ->
-                key(track.id()) {
+            participants.forEach { participant ->
+                key(participant.id) {
                     Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                        VideoRenderer(videoTrack = track, eglBaseContext = eglBaseContext, modifier = Modifier.fillMaxSize())
+                        NativeVideoRenderer(
+                            onSurfaceCreated = { onSurfaceReady(participant.id, it) },
+                            onSurfaceDestroyed = { },
+                            modifier = Modifier.fillMaxSize()
+                        )
                     }
                 }
             }
         }
     } else {
         Column(modifier = Modifier.fillMaxSize()) {
-            when (tracks.size) {
+            when (participants.size) {
                 1 -> {
-                    VideoRenderer(videoTrack = tracks[0], eglBaseContext = eglBaseContext, modifier = Modifier.fillMaxSize())
+                    NativeVideoRenderer(
+                        onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
+                        onSurfaceDestroyed = { },
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
                 2 -> {
-                    tracks.forEach { track ->
-                        key(track.id()) {
+                    participants.forEach { participant ->
+                        key(participant.id) {
                             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                                VideoRenderer(videoTrack = track, eglBaseContext = eglBaseContext, modifier = Modifier.fillMaxSize())
+                                NativeVideoRenderer(
+                                    onSurfaceCreated = { onSurfaceReady(participant.id, it) },
+                                    onSurfaceDestroyed = { },
+                                    modifier = Modifier.fillMaxSize()
+                                )
                             }
                         }
                     }
                 }
                 else -> {
                     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        VideoRenderer(videoTrack = tracks[0], eglBaseContext = eglBaseContext, modifier = Modifier.fillMaxSize())
+                        NativeVideoRenderer(
+                            onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
+                            onSurfaceDestroyed = { },
+                            modifier = Modifier.fillMaxSize()
+                        )
                     }
                     Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
                         Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                            VideoRenderer(videoTrack = tracks[1], eglBaseContext = eglBaseContext, modifier = Modifier.fillMaxSize())
+                            NativeVideoRenderer(
+                                onSurfaceCreated = { onSurfaceReady(participants[1].id, it) },
+                                onSurfaceDestroyed = { },
+                                modifier = Modifier.fillMaxSize()
+                            )
                         }
                         Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                            VideoRenderer(videoTrack = tracks[2], eglBaseContext = eglBaseContext, modifier = Modifier.fillMaxSize())
+                            NativeVideoRenderer(
+                                onSurfaceCreated = { onSurfaceReady(participants[2].id, it) },
+                                onSurfaceDestroyed = { },
+                                modifier = Modifier.fillMaxSize()
+                            )
                         }
                     }
                 }

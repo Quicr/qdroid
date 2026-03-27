@@ -1,19 +1,20 @@
 package com.cisco.quadroid
 
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.cisco.quadroid.webrtc.WebRtcSessionManager
+import com.cisco.quadroid.mediacodec.ParticipantStream
+import com.cisco.quadroid.mediacodec.VideoSessionManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import org.webrtc.VideoTrack
 import javax.inject.Inject
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
-    private val webRtcSessionManager: WebRtcSessionManager
+    private val videoSessionManager: VideoSessionManager
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow<CallUiState>(CallUiState.Lobby)
@@ -25,14 +26,14 @@ class MainViewModel @Inject constructor(
     private val _isVideoEnabled = MutableStateFlow(true)
     val isVideoEnabled: StateFlow<Boolean> = _isVideoEnabled.asStateFlow()
 
-    val localVideoTrack: StateFlow<VideoTrack?> = webRtcSessionManager.localVideoTrack
-    val remoteVideoTracks: StateFlow<List<VideoTrack>> = webRtcSessionManager.remoteVideoTracks
+    private val _videoToggleCount = MutableStateFlow(0)
+    val videoToggleCount: StateFlow<Int> = _videoToggleCount.asStateFlow()
 
-    fun getEglBaseContext() = webRtcSessionManager.getEglBaseContext()
+    val remoteParticipants: StateFlow<List<ParticipantStream>> = videoSessionManager.remoteParticipants
 
-    fun startCall() {
+    fun startCall(lifecycleOwner: LifecycleOwner) {
         viewModelScope.launch {
-            webRtcSessionManager.setupLocalStream()
+            videoSessionManager.startSession(lifecycleOwner)
             _uiState.value = CallUiState.InCall
         }
     }
@@ -40,21 +41,32 @@ class MainViewModel @Inject constructor(
     fun toggleVideo() {
         val newState = !_isVideoEnabled.value
         _isVideoEnabled.value = newState
-        webRtcSessionManager.enableVideo(newState)
+        if (newState) {
+            _videoToggleCount.value++
+        }
+        videoSessionManager.enableVideo(newState)
     }
 
     fun toggleAudio() {
         val newState = !_isMicEnabled.value
         _isMicEnabled.value = newState
-        webRtcSessionManager.enableAudio(newState)
+        videoSessionManager.enableAudio(newState)
     }
 
     fun simulateParticipant() {
-        webRtcSessionManager.simulateRemoteParticipant()
+        videoSessionManager.addSimulatedParticipant()
+    }
+
+    fun onLocalPreviewSurfaceReady(surface: android.view.Surface) {
+        videoSessionManager.setLocalPreviewSurface(surface)
+    }
+
+    fun onRemoteSurfaceReady(participantId: String, surface: android.view.Surface) {
+        videoSessionManager.onSurfaceReady(participantId, surface)
     }
 
     fun endCall() {
-        webRtcSessionManager.disconnect()
+        videoSessionManager.stopSession()
         _uiState.value = CallUiState.Lobby
         _isMicEnabled.value = true
         _isVideoEnabled.value = true
@@ -68,21 +80,21 @@ class MainViewModel @Inject constructor(
         _uiState.value = CallUiState.Lobby
     }
 
-    fun onStart() {
+    fun onStart(lifecycleOwner: LifecycleOwner) {
         if (_uiState.value is CallUiState.InCall) {
-            webRtcSessionManager.startVideo()
+            videoSessionManager.enableVideo(true)
         }
     }
 
     fun onStop() {
         if (_uiState.value is CallUiState.InCall) {
-            webRtcSessionManager.stopVideo()
+            // No-op for now, lifecycle handled by CameraX
         }
     }
 
     override fun onCleared() {
         super.onCleared()
-        webRtcSessionManager.disconnect()
+        videoSessionManager.stopSession()
     }
 }
 
