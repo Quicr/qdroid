@@ -302,7 +302,7 @@ fun InCallScreen(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
             ) {
-                showControls = !showControls
+                showLocalPip = !showLocalPip
             }
     ) {
         // 1. Remote Participants - Partitioned to fill screen
@@ -379,7 +379,7 @@ fun InCallScreen(
                         onClick = onSimulateParticipant,
                         colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)
                     ) {
-                        Icon(Icons.Default.PersonAdd, contentDescription = "Add Simulation")
+                        Icon(Icons.Default.PersonAdd, contentDescription = "Add Participant")
                     }
 
                     IconButton(
