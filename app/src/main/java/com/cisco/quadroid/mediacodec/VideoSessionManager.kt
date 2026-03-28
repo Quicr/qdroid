@@ -5,6 +5,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
+import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
@@ -20,6 +21,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.nio.ByteBuffer
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -33,30 +36,79 @@ class VideoSessionManager @Inject constructor(
     private val height = 720
     private val bitRate = 2000000 
     private val frameRate = 30
-    private val iFrameInterval = 1 
+    private val iFrameInterval = 2
+
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var lifecycleOwner: LifecycleOwner? = null
 
     private var encoder: MediaCodec? = null
     private var inputSurface: Surface? = null
-    
-    private val encoderThread = HandlerThread("EncoderThread").apply { start() }
+    private val encoderThread = HandlerThread("VideoSessionManager_Encoder").apply { start() }
     private val encoderHandler = Handler(encoderThread.looper)
-    
-    private val decoderThreads = mutableMapOf<String, HandlerThread>()
-    private val decoders = mutableMapOf<String, MediaCodec>()
+
+    @Volatile
+    private var encoderOutputFormat: MediaFormat? = null
+    private var formatLatch = CountDownLatch(1)
+
+    private val decoders = ConcurrentHashMap<String, MediaCodec>()
+    private val decoderThreads = ConcurrentHashMap<String, HandlerThread>()
+    private val decoderHandlers = ConcurrentHashMap<String, Handler>()
+
 
     private val _remoteParticipants = MutableStateFlow<List<ParticipantStream>>(emptyList())
     val remoteParticipants: StateFlow<List<ParticipantStream>> = _remoteParticipants.asStateFlow()
 
-    private var cameraProvider: ProcessCameraProvider? = null
-    private var encoderPreview: Preview? = null
-    private var localUiPreview: Preview? = null
-    private var currentLifecycleOwner: LifecycleOwner? = null
-    private var localUiSurface: Surface? = null
+    private var localPreviewSurface: Surface? = null
 
     fun startSession(lifecycleOwner: LifecycleOwner) {
-        currentLifecycleOwner = lifecycleOwner
+        this.lifecycleOwner = lifecycleOwner
+        formatLatch = CountDownLatch(1)
         setupEncoder()
         setupCamera(lifecycleOwner)
+    }
+
+    private fun setupCamera(owner: LifecycleOwner) {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+        cameraProviderFuture.addListener({
+            cameraProvider = cameraProviderFuture.get()
+            bindCameraUseCases(owner)
+        }, ContextCompat.getMainExecutor(context))
+    }
+
+    private fun bindCameraUseCases(owner: LifecycleOwner) {
+        if (cameraProvider == null) return
+        
+        cameraProvider?.unbindAll()
+
+        val encoderPreview = Preview.Builder().build().apply {
+            setSurfaceProvider { request ->
+                inputSurface?.let { request.provideSurface(it, ContextCompat.getMainExecutor(context)) {} }
+            }
+        }
+
+        val localUiPreview = Preview.Builder().build().apply {
+             localPreviewSurface?.let { surface ->
+                setSurfaceProvider { request ->
+                    request.provideSurface(surface, ContextCompat.getMainExecutor(context)) {}
+                }
+            }
+        }
+        
+        cameraProvider?.bindToLifecycle(
+            owner,
+            CameraSelector.DEFAULT_FRONT_CAMERA,
+            encoderPreview,
+            localUiPreview
+        )
+    }
+
+    fun setLocalPreviewSurface(surface: Surface) {
+        localPreviewSurface = surface
+        lifecycleOwner?.let {
+            if (cameraProvider != null) {
+                bindCameraUseCases(it)
+            }
+        }
     }
 
     private fun setupEncoder() {
@@ -65,132 +117,31 @@ class VideoSessionManager @Inject constructor(
             setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
             setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
-            setInteger(MediaFormat.KEY_PRIORITY, 0)
-            try {
-                setInteger(MediaFormat.KEY_LATENCY, 0)
-            } catch (e: Exception) {}
         }
 
-        val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
-        val encoderName = codecList.findEncoderForFormat(format)
+        val encoderName = MediaCodecList(MediaCodecList.REGULAR_CODECS).findEncoderForFormat(format)
         
         encoder = MediaCodec.createByCodecName(encoderName).apply {
             setCallback(object : MediaCodec.Callback() {
                 override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {}
                 override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                    getOutputBuffer(index)?.let { buffer ->
-                        if (info.size > 0) broadcastToDecoders(buffer, info)
+                    if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0) {
+                        getOutputBuffer(index)?.let { buffer ->
+                            if (info.size > 0) broadcastToDecoders(buffer, info)
+                        }
                     }
                     releaseOutputBuffer(index, false)
                 }
-                override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
-                    Log.e(tag, "Encoder Error", e)
+                override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) { Log.e(tag, "Encoder Error", e) }
+                override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
+                    encoderOutputFormat = format
+                    formatLatch.countDown()
                 }
-                override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {}
             }, encoderHandler)
-            
             configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             inputSurface = createInputSurface()
             start()
         }
-    }
-
-    private fun setupCamera(lifecycleOwner: LifecycleOwner) {
-        Log.d(tag, "setupCamera called")
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-        cameraProviderFuture.addListener({
-            Log.d(tag, "Camera provider future completed")
-            cameraProvider = cameraProviderFuture.get()
-            Log.d(tag, "Camera provider obtained: $cameraProvider")
-
-            encoderPreview = Preview.Builder()
-                .setTargetResolution(android.util.Size(width, height))
-                .build()
-            encoderPreview?.setSurfaceProvider { request ->
-                inputSurface?.let { request.provideSurface(it, ContextCompat.getMainExecutor(context)) { } }
-                Log.d(tag, "Encoder preview surface provider set")
-            }
-
-            localUiPreview = Preview.Builder().build()
-            Log.d(tag, "Local UI preview created")
-
-            // Connect local UI surface if already available
-            val shouldBindCamera = localUiSurface?.let { surface ->
-                Log.d(tag, "Local UI surface already available, setting surface provider")
-                localUiPreview?.setSurfaceProvider { request ->
-                    request.provideSurface(surface, ContextCompat.getMainExecutor(context)) { }
-                }
-                true
-            } ?: false
-
-            if (!shouldBindCamera) {
-                Log.d(tag, "No local UI surface available yet - will bind camera when surface is ready")
-            }
-
-            // Only bind camera if we have the local UI surface ready
-            if (shouldBindCamera) {
-                try {
-                    cameraProvider?.unbindAll()
-                    val camera = cameraProvider?.bindToLifecycle(
-                        lifecycleOwner,
-                        CameraSelector.DEFAULT_FRONT_CAMERA,
-                        encoderPreview,
-                        localUiPreview
-                    )
-                    Log.d(tag, "Camera bound in setupCamera: $camera")
-                } catch (e: Exception) {
-                    Log.e(tag, "Camera Binding Failed in setupCamera", e)
-                }
-            }
-        }, ContextCompat.getMainExecutor(context))
-    }
-
-    fun setLocalPreviewSurface(surface: Surface) {
-        Log.d(tag, "setLocalPreviewSurface called")
-        Log.d(tag, "  encoder=${encoder != null}")
-        Log.d(tag, "  cameraProvider=${cameraProvider != null}")
-        Log.d(tag, "  currentLifecycleOwner=${currentLifecycleOwner != null}")
-        Log.d(tag, "  encoderPreview=${encoderPreview != null}")
-        Log.d(tag, "  localUiPreview=${localUiPreview != null}")
-
-        localUiSurface = surface
-
-        // Connect the surface to the preview - CRITICAL: Do this before checking if camera is bound
-        localUiPreview?.setSurfaceProvider { request ->
-            request.provideSurface(surface, ContextCompat.getMainExecutor(context)) { }
-            Log.d(tag, "Local UI surface provided to preview")
-        }
-
-        // If camera is already bound, we need to rebind it to pick up the new surface
-        // This handles the case where setupCamera completed before the surface was ready
-        if (encoder != null && cameraProvider != null && currentLifecycleOwner != null && encoderPreview != null && localUiPreview != null) {
-            Log.d(tag, "All components ready - rebinding camera to pick up new surface")
-            try {
-                cameraProvider?.unbindAll()
-                val camera = cameraProvider?.bindToLifecycle(
-                    currentLifecycleOwner!!,
-                    CameraSelector.DEFAULT_FRONT_CAMERA,
-                    encoderPreview,
-                    localUiPreview
-                )
-                Log.d(tag, "Camera rebound successfully with new surface - camera=$camera")
-            } catch (e: Exception) {
-                Log.e(tag, "Camera Rebinding Failed in setLocalPreviewSurface", e)
-                e.printStackTrace()
-            }
-        } else {
-            Log.w(tag, "Cannot bind camera yet - waiting for components:")
-            if (encoder == null) Log.w(tag, "  - encoder is null")
-            if (cameraProvider == null) Log.w(tag, "  - cameraProvider is null")
-            if (currentLifecycleOwner == null) Log.w(tag, "  - currentLifecycleOwner is null")
-            if (encoderPreview == null) Log.w(tag, "  - encoderPreview is null")
-            if (localUiPreview == null) Log.w(tag, "  - localUiPreview is null")
-        }
-    }
-
-    fun clearLocalPreviewSurface() {
-        Log.d(tag, "clearLocalPreviewSurface called")
-        localUiSurface = null
     }
 
     fun addSimulatedParticipant() {
@@ -199,102 +150,111 @@ class VideoSessionManager @Inject constructor(
         _remoteParticipants.value = _remoteParticipants.value + stream
     }
 
-    fun onSurfaceReady(participantId: String, surface: Surface) {
-        setupDecoder(participantId, surface)
+    fun onRemoteSurfaceReady(participantId: String, surface: Surface) {
+        decoders[participantId]?.setOutputSurface(surface) ?: run {
+            val thread = HandlerThread("SetupDecoderThread_$participantId").apply { start() }
+            Handler(thread.looper).post {
+                try {
+                    formatLatch.await()
+                    setupDecoder(participantId, surface)
+                } catch (e: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                }
+            }
+        }
+    }
+    
+    fun onRemoteSurfaceDestroyed(participantId: String) {
+        decoderHandlers[participantId]?.removeCallbacksAndMessages(null)
+        decoderThreads[participantId]?.quitSafely()
+        decoders[participantId]?.stop()
+        decoders[participantId]?.release()
+        decoders.remove(participantId)
+        decoderThreads.remove(participantId)
+        decoderHandlers.remove(participantId)
     }
 
     private fun setupDecoder(id: String, surface: Surface) {
-        val format = MediaFormat.createVideoFormat(mimeType, width, height).apply {
-            try { setInteger("low-latency", 1) } catch (e: Exception) {}
-        }
-        val thread = HandlerThread("DecoderThread_$id").apply { start() }
-        decoderThreads[id] = thread
+        val format = encoderOutputFormat ?: return
         
+        val thread = HandlerThread("DecoderThread_$id").apply { start() }
+        val handler = Handler(thread.looper)
+        decoderThreads[id] = thread
+        decoderHandlers[id] = handler
+
         val decoder = MediaCodec.createDecoderByType(mimeType).apply {
-            setCallback(object : MediaCodec.Callback() {
-                override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {}
-                override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                    releaseOutputBuffer(index, true)
-                }
-                override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {}
-                override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {}
-            }, Handler(thread.looper))
             configure(format, surface, null, 0)
             start()
         }
         decoders[id] = decoder
+        
+        handler.post(object : Runnable {
+            override fun run() {
+                decoders[id]?.let {
+                    val bufferInfo = MediaCodec.BufferInfo()
+                    try {
+                        val outIndex = it.dequeueOutputBuffer(bufferInfo, 0)
+                        if (outIndex >= 0) {
+                            it.releaseOutputBuffer(outIndex, true)
+                        }
+                        handler.post(this)
+                    } catch (e: Exception) {
+                        // Decoder was likely released, stop the loop
+                    }
+                }
+            }
+        })
+        
+        encoder?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
     }
 
     private fun broadcastToDecoders(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
-        decoders.values.forEach { decoder ->
+        decoders.forEach { (id, decoder) ->
             try {
-                val index = decoder.dequeueInputBuffer(0)
+                val index = decoder.dequeueInputBuffer(10000)
                 if (index >= 0) {
-                    decoder.getInputBuffer(index)?.apply {
-                        clear()
-                        put(buffer)
-                        decoder.queueInputBuffer(index, 0, info.size, info.presentationTimeUs, info.flags)
-                    }
+                    val inputBuffer = decoder.getInputBuffer(index)
+                    inputBuffer?.clear()
+                    inputBuffer?.put(buffer.duplicate())
+                    decoder.queueInputBuffer(index, 0, info.size, info.presentationTimeUs, info.flags)
                 }
-            } catch (e: Exception) {}
+            } catch (e: Exception) {
+                // This can happen if the decoder is released, it's safe to ignore
+            }
         }
     }
-
-    fun enableVideo(enabled: Boolean) {
+    
+    fun enableVideo(enabled: Boolean, owner: LifecycleOwner) {
         if (enabled) {
-            Log.d(tag, "enableVideo(true) - starting, recreating everything for reliability")
-            currentLifecycleOwner?.let { lifecycleOwner ->
-                // Always do full recreation for reliability
-                // Clean up old resources
-                cameraProvider?.unbindAll()
-                encoder?.apply {
-                    stop()
-                    release()
-                }
-                encoder = null
-                inputSurface?.release()
-                inputSurface = null
-
-                // Setup new encoder with new input surface
-                setupEncoder()
-
-                // Setup camera (will create previews and bind camera when surface is ready)
-                setupCamera(lifecycleOwner)
-
-                Log.d(tag, "enableVideo(true) - Full setup completed")
-            }
+            bindCameraUseCases(owner)
         } else {
-            Log.d(tag, "enableVideo(false) - disabling video")
-            // Unbind camera and clean up
             cameraProvider?.unbindAll()
-            encoder?.apply {
-                stop()
-                release()
-            }
-            encoder = null
-            inputSurface?.release()
-            inputSurface = null
-            localUiSurface = null
         }
     }
+    
+    fun enableAudio(enabled: Boolean) {}
 
-    fun enableAudio(enabled: Boolean) {
-        // Implementation for audio mute/unmute
-    }
-
+    @Synchronized
     fun stopSession() {
         cameraProvider?.unbindAll()
-        encoder?.apply { stop(); release() }
+        encoder?.stop()
+        encoder?.release()
         encoder = null
-        decoders.forEach { (id, dec) -> 
-            dec.stop(); dec.release()
-            decoderThreads[id]?.quitSafely()
-        }
+
+        decoderHandlers.forEach { (_, handler) -> handler.removeCallbacksAndMessages(null) }
+        decoderHandlers.clear()
+
+        decoders.forEach { (_, dec) -> dec.stop(); dec.release() }
         decoders.clear()
+
+        decoderThreads.forEach { (_, thread) -> thread.quitSafely() }
         decoderThreads.clear()
+
         inputSurface?.release()
         inputSurface = null
         _remoteParticipants.value = emptyList()
+        encoderOutputFormat = null
+        formatLatch = CountDownLatch(1)
     }
 }
 

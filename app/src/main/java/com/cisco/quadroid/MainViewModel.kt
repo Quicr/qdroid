@@ -25,7 +25,7 @@ class MainViewModel @Inject constructor(
 
     private val _isVideoEnabled = MutableStateFlow(true)
     val isVideoEnabled: StateFlow<Boolean> = _isVideoEnabled.asStateFlow()
-
+    
     private val _videoToggleCount = MutableStateFlow(0)
     val videoToggleCount: StateFlow<Int> = _videoToggleCount.asStateFlow()
 
@@ -38,13 +38,13 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun toggleVideo() {
+    fun toggleVideo(lifecycleOwner: LifecycleOwner) {
         val newState = !_isVideoEnabled.value
         _isVideoEnabled.value = newState
-        if (newState) {
-            _videoToggleCount.value++
+        if(newState) {
+             _videoToggleCount.value++
         }
-        videoSessionManager.enableVideo(newState)
+        videoSessionManager.enableVideo(newState, lifecycleOwner)
     }
 
     fun toggleAudio() {
@@ -62,7 +62,11 @@ class MainViewModel @Inject constructor(
     }
 
     fun onRemoteSurfaceReady(participantId: String, surface: android.view.Surface) {
-        videoSessionManager.onSurfaceReady(participantId, surface)
+        videoSessionManager.onRemoteSurfaceReady(participantId, surface)
+    }
+    
+    fun onRemoteSurfaceDestroyed(participantId: String) {
+        videoSessionManager.onRemoteSurfaceDestroyed(participantId)
     }
 
     fun endCall() {
@@ -78,23 +82,6 @@ class MainViewModel @Inject constructor(
 
     fun saveSettings() {
         _uiState.value = CallUiState.Lobby
-    }
-
-    fun onStart(lifecycleOwner: LifecycleOwner) {
-        if (_uiState.value is CallUiState.InCall) {
-            videoSessionManager.enableVideo(true)
-        }
-    }
-
-    fun onStop() {
-        if (_uiState.value is CallUiState.InCall) {
-            // No-op for now, lifecycle handled by CameraX
-        }
-    }
-
-    override fun onCleared() {
-        super.onCleared()
-        videoSessionManager.stopSession()
     }
 }
 

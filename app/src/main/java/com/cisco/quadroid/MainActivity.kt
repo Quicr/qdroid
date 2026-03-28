@@ -3,16 +3,10 @@ package com.cisco.quadroid
 import android.Manifest
 import android.content.res.Configuration
 import android.os.Bundle
-import android.view.Surface
-import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
-import androidx.camera.core.Preview
-import androidx.camera.core.CameraSelector
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -66,8 +60,6 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -79,17 +71,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
-import androidx.core.content.ContextCompat
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.cisco.quadroid.mediacodec.ParticipantStream
 import com.cisco.quadroid.ui.components.NativeVideoRenderer
@@ -97,7 +83,6 @@ import com.cisco.quadroid.ui.theme.QuadroidTheme
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.delay
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -122,6 +107,7 @@ fun MainScreen(viewModel: MainViewModel) {
     val remoteParticipants by viewModel.remoteParticipants.collectAsStateWithLifecycle()
     val isMicEnabled by viewModel.isMicEnabled.collectAsStateWithLifecycle()
     val isVideoEnabled by viewModel.isVideoEnabled.collectAsStateWithLifecycle()
+    val videoToggleCount by viewModel.videoToggleCount.collectAsStateWithLifecycle()
 
     val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -155,11 +141,12 @@ fun MainScreen(viewModel: MainViewModel) {
                         remoteParticipants = remoteParticipants,
                         isMicEnabled = isMicEnabled,
                         isVideoEnabled = isVideoEnabled,
+                        videoToggleCount = videoToggleCount,
+                        onLocalPreviewSurfaceReady = { surface -> viewModel.onLocalPreviewSurfaceReady(surface) },
                         onRemoteSurfaceReady = { id, surface -> viewModel.onRemoteSurfaceReady(id, surface) },
+                        onRemoteSurfaceDestroyed = { id -> viewModel.onRemoteSurfaceDestroyed(id) },
                         onSimulateParticipant = { viewModel.simulateParticipant() },
-                        onToggleVideo = { viewModel.toggleVideo(
-
-                        ) },
+                        onToggleVideo = { viewModel.toggleVideo(lifecycleOwner) },
                         onToggleAudio = { viewModel.toggleAudio() },
                         onEndCall = { viewModel.endCall() }
                     )
@@ -254,7 +241,10 @@ fun InCallScreen(
     remoteParticipants: List<ParticipantStream>,
     isMicEnabled: Boolean,
     isVideoEnabled: Boolean,
-    onRemoteSurfaceReady: (String, Surface) -> Unit,
+    videoToggleCount: Int,
+    onLocalPreviewSurfaceReady: (android.view.Surface) -> Unit,
+    onRemoteSurfaceReady: (String, android.view.Surface) -> Unit,
+    onRemoteSurfaceDestroyed: (String) -> Unit,
     onSimulateParticipant: () -> Unit,
     onToggleVideo: () -> Unit,
     onToggleAudio: () -> Unit,
@@ -264,7 +254,6 @@ fun InCallScreen(
     
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-    val lifecycleOwner = LocalLifecycleOwner.current
 
     Box(
         modifier = Modifier
@@ -281,7 +270,13 @@ fun InCallScreen(
         Box(modifier = Modifier.fillMaxSize()) {
             if (remoteParticipants.isEmpty()) {
                 if (isVideoEnabled) {
-                    CameraPreview(lifecycleOwner = lifecycleOwner, modifier = Modifier.fillMaxSize())
+                    key(videoToggleCount) {
+                        NativeVideoRenderer(
+                            onSurfaceCreated = onLocalPreviewSurfaceReady,
+                            onSurfaceDestroyed = { }, // Local surface is managed by session lifecycle
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
                 } else {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Icon(Icons.Default.VideocamOff, contentDescription = null, tint = Color.White.copy(alpha = 0.5f), modifier = Modifier.size(64.dp))
@@ -291,6 +286,7 @@ fun InCallScreen(
                 AdaptiveNativeGrid(
                     participants = remoteParticipants,
                     onSurfaceReady = onRemoteSurfaceReady,
+                    onSurfaceDestroyed = onRemoteSurfaceDestroyed,
                     isLandscape = isLandscape
                 )
             }
@@ -316,7 +312,14 @@ fun InCallScreen(
                         .background(Color.Black.copy(alpha = 0.2f))
                 ) {
                     if (isVideoEnabled) {
-                        CameraPreview(lifecycleOwner = lifecycleOwner, modifier = Modifier.fillMaxSize())
+                        key(videoToggleCount) {
+                            NativeVideoRenderer(
+                                onSurfaceCreated = onLocalPreviewSurfaceReady,
+                                onSurfaceDestroyed = { }, // Local surface is managed by session lifecycle
+                                modifier = Modifier.fillMaxSize(),
+                                zOrderMediaOverlay = true
+                            )
+                        }
                     } else {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             Icon(Icons.Default.VideocamOff, contentDescription = null, tint = Color.White.copy(alpha = 0.5f))
@@ -392,37 +395,10 @@ fun InCallScreen(
 }
 
 @Composable
-fun CameraPreview(
-    lifecycleOwner: LifecycleOwner,
-    modifier: Modifier = Modifier
-) {
-    val context = LocalContext.current
-    val previewView = remember { PreviewView(context) }
-
-    LaunchedEffect(lifecycleOwner) {
-        val cameraProvider = ProcessCameraProvider.getInstance(context).get()
-        val preview = Preview.Builder().build().also {
-            it.setSurfaceProvider(previewView.surfaceProvider)
-        }
-        val cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
-
-        try {
-            cameraProvider.unbindAll()
-            cameraProvider.bindToLifecycle(
-                lifecycleOwner, cameraSelector, preview
-            )
-        } catch(exc: Exception) {
-            // Log error
-        }
-    }
-
-    AndroidView({ previewView }, modifier = modifier)
-}
-
-@Composable
 fun AdaptiveNativeGrid(
     participants: List<ParticipantStream>,
-    onSurfaceReady: (String, Surface) -> Unit,
+    onSurfaceReady: (String, android.view.Surface) -> Unit,
+    onSurfaceDestroyed: (String) -> Unit,
     isLandscape: Boolean
 ) {
     if (isLandscape) {
@@ -432,7 +408,7 @@ fun AdaptiveNativeGrid(
                     Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                         NativeVideoRenderer(
                             onSurfaceCreated = { onSurfaceReady(participant.id, it) },
-                            onSurfaceDestroyed = { },
+                            onSurfaceDestroyed = { onSurfaceDestroyed(participant.id) },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -445,7 +421,7 @@ fun AdaptiveNativeGrid(
                 1 -> {
                     NativeVideoRenderer(
                         onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
-                        onSurfaceDestroyed = { },
+                        onSurfaceDestroyed = { onSurfaceDestroyed(participants[0].id) },
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -455,7 +431,7 @@ fun AdaptiveNativeGrid(
                             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                                 NativeVideoRenderer(
                                     onSurfaceCreated = { onSurfaceReady(participant.id, it) },
-                                    onSurfaceDestroyed = { },
+                                    onSurfaceDestroyed = { onSurfaceDestroyed(participant.id) },
                                     modifier = Modifier.fillMaxSize()
                                 )
                             }
@@ -466,7 +442,7 @@ fun AdaptiveNativeGrid(
                     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                         NativeVideoRenderer(
                             onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
-                            onSurfaceDestroyed = { },
+                            onSurfaceDestroyed = { onSurfaceDestroyed(participants[0].id) },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -474,14 +450,14 @@ fun AdaptiveNativeGrid(
                         Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                             NativeVideoRenderer(
                                 onSurfaceCreated = { onSurfaceReady(participants[1].id, it) },
-                                onSurfaceDestroyed = { },
+                                onSurfaceDestroyed = { onSurfaceDestroyed(participants[1].id) },
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
                         Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                             NativeVideoRenderer(
                                 onSurfaceCreated = { onSurfaceReady(participants[2].id, it) },
-                                onSurfaceDestroyed = { },
+                                onSurfaceDestroyed = { onSurfaceDestroyed(participants[2].id) },
                                 modifier = Modifier.fillMaxSize()
                             )
                         }
