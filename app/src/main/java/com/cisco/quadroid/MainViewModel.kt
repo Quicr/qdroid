@@ -29,11 +29,13 @@ class MainViewModel @Inject constructor(
     private val _videoToggleCount = MutableStateFlow(0)
     val videoToggleCount: StateFlow<Int> = _videoToggleCount.asStateFlow()
 
+    val videoAspectRatio: StateFlow<Float> = videoSessionManager.videoAspectRatio
+
     val remoteParticipants: StateFlow<List<ParticipantStream>> = videoSessionManager.remoteParticipants
 
-    fun startCall(lifecycleOwner: LifecycleOwner) {
+    fun startCall(lifecycleOwner: LifecycleOwner, rotation: Int) {
         viewModelScope.launch {
-            videoSessionManager.startSession(lifecycleOwner)
+            videoSessionManager.startSession(lifecycleOwner, rotation)
             _uiState.value = CallUiState.InCall
         }
     }

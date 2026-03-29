@@ -1,7 +1,6 @@
 package com.cisco.quadroid
 
 import android.Manifest
-import android.content.res.Configuration
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -71,6 +70,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -108,8 +108,10 @@ fun MainScreen(viewModel: MainViewModel) {
     val isMicEnabled by viewModel.isMicEnabled.collectAsStateWithLifecycle()
     val isVideoEnabled by viewModel.isVideoEnabled.collectAsStateWithLifecycle()
     val videoToggleCount by viewModel.videoToggleCount.collectAsStateWithLifecycle()
+    val videoAspectRatio by viewModel.videoAspectRatio.collectAsStateWithLifecycle()
 
     val lifecycleOwner = LocalLifecycleOwner.current
+    val context = LocalContext.current
 
     val permissionsState = rememberMultiplePermissionsState(
         permissions = listOf(
@@ -128,7 +130,8 @@ fun MainScreen(viewModel: MainViewModel) {
                     LobbyScreen(
                         onStartCall = {
                             if (permissionsState.allPermissionsGranted) {
-                                viewModel.startCall(lifecycleOwner)
+                                val rotation = context.display?.rotation ?: 0
+                                viewModel.startCall(lifecycleOwner, rotation)
                             } else {
                                 permissionsState.launchMultiplePermissionRequest()
                             }
@@ -142,6 +145,7 @@ fun MainScreen(viewModel: MainViewModel) {
                         isMicEnabled = isMicEnabled,
                         isVideoEnabled = isVideoEnabled,
                         videoToggleCount = videoToggleCount,
+                        videoAspectRatio = videoAspectRatio,
                         onLocalPreviewSurfaceReady = { surface -> viewModel.onLocalPreviewSurfaceReady(surface) },
                         onRemoteSurfaceReady = { id, surface -> viewModel.onRemoteSurfaceReady(id, surface) },
                         onRemoteSurfaceDestroyed = { id -> viewModel.onRemoteSurfaceDestroyed(id) },
@@ -242,6 +246,7 @@ fun InCallScreen(
     isMicEnabled: Boolean,
     isVideoEnabled: Boolean,
     videoToggleCount: Int,
+    videoAspectRatio: Float,
     onLocalPreviewSurfaceReady: (android.view.Surface) -> Unit,
     onRemoteSurfaceReady: (String, android.view.Surface) -> Unit,
     onRemoteSurfaceDestroyed: (String) -> Unit,
@@ -252,8 +257,8 @@ fun InCallScreen(
 ) {
     var showControls by remember { mutableStateOf(true) }
     
-    val configuration = LocalConfiguration.current
-    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val configuration = androidx.compose.ui.platform.LocalConfiguration.current
+    val isLandscape = configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
 
     Box(
         modifier = Modifier
@@ -273,8 +278,10 @@ fun InCallScreen(
                     key(videoToggleCount) {
                         NativeVideoRenderer(
                             onSurfaceCreated = onLocalPreviewSurfaceReady,
-                            onSurfaceDestroyed = { }, // Local surface is managed by session lifecycle
-                            modifier = Modifier.fillMaxSize()
+                            onSurfaceDestroyed = { },
+                            modifier = Modifier.fillMaxSize(),
+                            mirrorHorizontal = true,
+                            aspectRatio = videoAspectRatio
                         )
                     }
                 } else {
@@ -287,7 +294,8 @@ fun InCallScreen(
                     participants = remoteParticipants,
                     onSurfaceReady = onRemoteSurfaceReady,
                     onSurfaceDestroyed = onRemoteSurfaceDestroyed,
-                    isLandscape = isLandscape
+                    isLandscape = isLandscape,
+                    aspectRatio = videoAspectRatio
                 )
             }
         }
@@ -315,9 +323,11 @@ fun InCallScreen(
                         key(videoToggleCount) {
                             NativeVideoRenderer(
                                 onSurfaceCreated = onLocalPreviewSurfaceReady,
-                                onSurfaceDestroyed = { }, // Local surface is managed by session lifecycle
+                                onSurfaceDestroyed = { },
                                 modifier = Modifier.fillMaxSize(),
-                                zOrderMediaOverlay = true
+                                zOrderMediaOverlay = true,
+                                mirrorHorizontal = true,
+                                aspectRatio = videoAspectRatio
                             )
                         }
                     } else {
@@ -399,7 +409,8 @@ fun AdaptiveNativeGrid(
     participants: List<ParticipantStream>,
     onSurfaceReady: (String, android.view.Surface) -> Unit,
     onSurfaceDestroyed: (String) -> Unit,
-    isLandscape: Boolean
+    isLandscape: Boolean,
+    aspectRatio: Float
 ) {
     if (isLandscape) {
         Row(modifier = Modifier.fillMaxSize()) {
@@ -409,7 +420,9 @@ fun AdaptiveNativeGrid(
                         NativeVideoRenderer(
                             onSurfaceCreated = { onSurfaceReady(participant.id, it) },
                             onSurfaceDestroyed = { onSurfaceDestroyed(participant.id) },
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier.fillMaxSize(),
+                            mirrorHorizontal = true,
+                            aspectRatio = aspectRatio
                         )
                     }
                 }
@@ -422,7 +435,9 @@ fun AdaptiveNativeGrid(
                     NativeVideoRenderer(
                         onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
                         onSurfaceDestroyed = { onSurfaceDestroyed(participants[0].id) },
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        mirrorHorizontal = true,
+                        aspectRatio = aspectRatio
                     )
                 }
                 2 -> {
@@ -432,7 +447,9 @@ fun AdaptiveNativeGrid(
                                 NativeVideoRenderer(
                                     onSurfaceCreated = { onSurfaceReady(participant.id, it) },
                                     onSurfaceDestroyed = { onSurfaceDestroyed(participant.id) },
-                                    modifier = Modifier.fillMaxSize()
+                                    modifier = Modifier.fillMaxSize(),
+                                    mirrorHorizontal = true,
+                                    aspectRatio = aspectRatio
                                 )
                             }
                         }
@@ -443,7 +460,9 @@ fun AdaptiveNativeGrid(
                         NativeVideoRenderer(
                             onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
                             onSurfaceDestroyed = { onSurfaceDestroyed(participants[0].id) },
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier.fillMaxSize(),
+                            mirrorHorizontal = true,
+                            aspectRatio = aspectRatio
                         )
                     }
                     Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
@@ -451,14 +470,18 @@ fun AdaptiveNativeGrid(
                             NativeVideoRenderer(
                                 onSurfaceCreated = { onSurfaceReady(participants[1].id, it) },
                                 onSurfaceDestroyed = { onSurfaceDestroyed(participants[1].id) },
-                                modifier = Modifier.fillMaxSize()
+                                modifier = Modifier.fillMaxSize(),
+                                mirrorHorizontal = true,
+                                aspectRatio = aspectRatio
                             )
                         }
                         Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                             NativeVideoRenderer(
                                 onSurfaceCreated = { onSurfaceReady(participants[2].id, it) },
                                 onSurfaceDestroyed = { onSurfaceDestroyed(participants[2].id) },
-                                modifier = Modifier.fillMaxSize()
+                                modifier = Modifier.fillMaxSize(),
+                                mirrorHorizontal = true,
+                                aspectRatio = aspectRatio
                             )
                         }
                     }

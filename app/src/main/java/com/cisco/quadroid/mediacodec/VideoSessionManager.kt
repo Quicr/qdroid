@@ -40,6 +40,7 @@ class VideoSessionManager @Inject constructor(
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var lifecycleOwner: LifecycleOwner? = null
+    private var rotation: Int = 0
 
     private var encoder: MediaCodec? = null
     private var inputSurface: Surface? = null
@@ -54,14 +55,18 @@ class VideoSessionManager @Inject constructor(
     private val decoderThreads = ConcurrentHashMap<String, HandlerThread>()
     private val decoderHandlers = ConcurrentHashMap<String, Handler>()
 
-
     private val _remoteParticipants = MutableStateFlow<List<ParticipantStream>>(emptyList())
     val remoteParticipants: StateFlow<List<ParticipantStream>> = _remoteParticipants.asStateFlow()
 
+    // Default to portrait ratio (720/1280) since we apply 90deg rotation
+    private val _videoAspectRatio = MutableStateFlow(height.toFloat() / width.toFloat())
+    val videoAspectRatio: StateFlow<Float> = _videoAspectRatio.asStateFlow()
+
     private var localPreviewSurface: Surface? = null
 
-    fun startSession(lifecycleOwner: LifecycleOwner) {
+    fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int) {
         this.lifecycleOwner = lifecycleOwner
+        this.rotation = rotation
         formatLatch = CountDownLatch(1)
         setupEncoder()
         setupCamera(lifecycleOwner)
@@ -76,39 +81,51 @@ class VideoSessionManager @Inject constructor(
     }
 
     private fun bindCameraUseCases(owner: LifecycleOwner) {
-        if (cameraProvider == null) return
+        val provider = cameraProvider ?: return
         
-        cameraProvider?.unbindAll()
+        provider.unbindAll()
 
-        val encoderPreview = Preview.Builder().build().apply {
-            setSurfaceProvider { request ->
-                inputSurface?.let { request.provideSurface(it, ContextCompat.getMainExecutor(context)) {} }
-            }
-        }
-
-        val localUiPreview = Preview.Builder().build().apply {
-             localPreviewSurface?.let { surface ->
+        val encoderPreview = Preview.Builder()
+            .setTargetRotation(rotation)
+            .build().apply {
                 setSurfaceProvider { request ->
-                    request.provideSurface(surface, ContextCompat.getMainExecutor(context)) {}
+                    inputSurface?.let { request.provideSurface(it, ContextCompat.getMainExecutor(context)) {} }
                 }
             }
+
+        val localUiPreview = Preview.Builder()
+            .setTargetRotation(rotation)
+            .build()
+            
+        localPreviewSurface?.let { surface ->
+            localUiPreview.setSurfaceProvider { request ->
+                request.provideSurface(surface, ContextCompat.getMainExecutor(context)) {}
+            }
         }
         
-        cameraProvider?.bindToLifecycle(
-            owner,
-            CameraSelector.DEFAULT_FRONT_CAMERA,
-            encoderPreview,
-            localUiPreview
-        )
+        try {
+            if (localPreviewSurface != null) {
+                provider.bindToLifecycle(
+                    owner,
+                    CameraSelector.DEFAULT_FRONT_CAMERA,
+                    encoderPreview,
+                    localUiPreview
+                )
+            } else {
+                provider.bindToLifecycle(
+                    owner,
+                    CameraSelector.DEFAULT_FRONT_CAMERA,
+                    encoderPreview
+                )
+            }
+        } catch (exc: Exception) {
+            Log.e(tag, "Use case binding failed", exc)
+        }
     }
 
     fun setLocalPreviewSurface(surface: Surface) {
         localPreviewSurface = surface
-        lifecycleOwner?.let {
-            if (cameraProvider != null) {
-                bindCameraUseCases(it)
-            }
-        }
+        lifecycleOwner?.let { bindCameraUseCases(it) }
     }
 
     private fun setupEncoder() {
@@ -134,7 +151,17 @@ class VideoSessionManager @Inject constructor(
                 }
                 override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) { Log.e(tag, "Encoder Error", e) }
                 override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
-                    encoderOutputFormat = format
+                    val rotatedFormat = MediaFormat().apply {
+                        setInteger(MediaFormat.KEY_WIDTH, format.getInteger(MediaFormat.KEY_WIDTH))
+                        setInteger(MediaFormat.KEY_HEIGHT, format.getInteger(MediaFormat.KEY_HEIGHT))
+                        setString(MediaFormat.KEY_MIME, mimeType)
+                        if (format.containsKey("csd-0")) setByteBuffer("csd-0", format.getByteBuffer("csd-0"))
+                        if (format.containsKey("csd-1")) setByteBuffer("csd-1", format.getByteBuffer("csd-1"))
+
+                        // 90 degrees rotation for portrait display
+                        setInteger("rotation-degrees", 0)
+                    }
+                    encoderOutputFormat = rotatedFormat
                     formatLatch.countDown()
                 }
             }, encoderHandler)
@@ -165,13 +192,18 @@ class VideoSessionManager @Inject constructor(
     }
     
     fun onRemoteSurfaceDestroyed(participantId: String) {
-        decoderHandlers[participantId]?.removeCallbacksAndMessages(null)
-        decoderThreads[participantId]?.quitSafely()
-        decoders[participantId]?.stop()
-        decoders[participantId]?.release()
-        decoders.remove(participantId)
-        decoderThreads.remove(participantId)
-        decoderHandlers.remove(participantId)
+        synchronized(this) {
+            decoderHandlers.remove(participantId)?.removeCallbacksAndMessages(null)
+            decoders.remove(participantId)?.apply {
+                try {
+                    stop()
+                    release()
+                } catch (e: Exception) {
+                    Log.e(tag, "Error releasing decoder", e)
+                }
+            }
+            decoderThreads.remove(participantId)?.quitSafely()
+        }
     }
 
     private fun setupDecoder(id: String, surface: Surface) {
@@ -190,17 +222,15 @@ class VideoSessionManager @Inject constructor(
         
         handler.post(object : Runnable {
             override fun run() {
-                decoders[id]?.let {
+                if (decoders.containsKey(id)) {
                     val bufferInfo = MediaCodec.BufferInfo()
                     try {
-                        val outIndex = it.dequeueOutputBuffer(bufferInfo, 0)
+                        val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 0)
                         if (outIndex >= 0) {
-                            it.releaseOutputBuffer(outIndex, true)
+                            decoder.releaseOutputBuffer(outIndex, true)
                         }
                         handler.post(this)
-                    } catch (e: Exception) {
-                        // Decoder was likely released, stop the loop
-                    }
+                    } catch (e: Exception) {}
                 }
             }
         })
@@ -218,9 +248,7 @@ class VideoSessionManager @Inject constructor(
                     inputBuffer?.put(buffer.duplicate())
                     decoder.queueInputBuffer(index, 0, info.size, info.presentationTimeUs, info.flags)
                 }
-            } catch (e: Exception) {
-                // This can happen if the decoder is released, it's safe to ignore
-            }
+            } catch (e: Exception) {}
         }
     }
     
@@ -244,7 +272,9 @@ class VideoSessionManager @Inject constructor(
         decoderHandlers.forEach { (_, handler) -> handler.removeCallbacksAndMessages(null) }
         decoderHandlers.clear()
 
-        decoders.forEach { (_, dec) -> dec.stop(); dec.release() }
+        decoders.forEach { (_, dec) -> 
+            try { dec.stop(); dec.release() } catch(e: Exception) {}
+        }
         decoders.clear()
 
         decoderThreads.forEach { (_, thread) -> thread.quitSafely() }
