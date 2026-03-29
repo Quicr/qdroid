@@ -1,10 +1,14 @@
 package com.cisco.quadroid.mediacodec
 
+import android.annotation.SuppressLint
 import android.content.Context
+import android.media.AudioFormat
+import android.media.AudioRecord
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat
+import android.media.MediaRecorder
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
@@ -31,12 +35,25 @@ class VideoSessionManager @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     private val tag = "VideoSessionManager"
-    private val mimeType = MediaFormat.MIMETYPE_VIDEO_AVC
+
+    // Video Config: Use landscape for capture stability, rotate in metadata
+    private val videoMimeType = MediaFormat.MIMETYPE_VIDEO_AVC
     private val width = 1280
     private val height = 720
     private val bitRate = 2000000 
     private val frameRate = 30
     private val iFrameInterval = 2
+
+    // Audio Config
+    private val audioSource = MediaRecorder.AudioSource.MIC
+    private val sampleRate = 44100
+    private val channelConfig = AudioFormat.CHANNEL_IN_MONO
+    private val audioFormat = AudioFormat.ENCODING_PCM_16BIT
+    private val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
+
+    private var audioRecord: AudioRecord? = null
+    private var isMicEnabled = true
+    private var audioThread: Thread? = null
 
     private var cameraProvider: ProcessCameraProvider? = null
     private var lifecycleOwner: LifecycleOwner? = null
@@ -57,8 +74,8 @@ class VideoSessionManager @Inject constructor(
 
     private val _remoteParticipants = MutableStateFlow<List<ParticipantStream>>(emptyList())
     val remoteParticipants: StateFlow<List<ParticipantStream>> = _remoteParticipants.asStateFlow()
-
-    // Default to portrait ratio (720/1280) since we apply 90deg rotation
+    
+    // Default to portrait ratio (720/1280) for the UI
     private val _videoAspectRatio = MutableStateFlow(height.toFloat() / width.toFloat())
     val videoAspectRatio: StateFlow<Float> = _videoAspectRatio.asStateFlow()
 
@@ -70,19 +87,23 @@ class VideoSessionManager @Inject constructor(
         formatLatch = CountDownLatch(1)
         setupEncoder()
         setupCamera(lifecycleOwner)
+        startAudioCapture()
     }
 
     private fun setupCamera(owner: LifecycleOwner) {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         cameraProviderFuture.addListener({
-            cameraProvider = cameraProviderFuture.get()
-            bindCameraUseCases(owner)
+            try {
+                cameraProvider = cameraProviderFuture.get()
+                bindCameraUseCases(owner)
+            } catch (e: Exception) {
+                Log.e(tag, "Failed to get camera provider", e)
+            }
         }, ContextCompat.getMainExecutor(context))
     }
 
     private fun bindCameraUseCases(owner: LifecycleOwner) {
         val provider = cameraProvider ?: return
-        
         provider.unbindAll()
 
         val encoderPreview = Preview.Builder()
@@ -105,18 +126,9 @@ class VideoSessionManager @Inject constructor(
         
         try {
             if (localPreviewSurface != null) {
-                provider.bindToLifecycle(
-                    owner,
-                    CameraSelector.DEFAULT_FRONT_CAMERA,
-                    encoderPreview,
-                    localUiPreview
-                )
+                provider.bindToLifecycle(owner, CameraSelector.DEFAULT_FRONT_CAMERA, encoderPreview, localUiPreview)
             } else {
-                provider.bindToLifecycle(
-                    owner,
-                    CameraSelector.DEFAULT_FRONT_CAMERA,
-                    encoderPreview
-                )
+                provider.bindToLifecycle(owner, CameraSelector.DEFAULT_FRONT_CAMERA, encoderPreview)
             }
         } catch (exc: Exception) {
             Log.e(tag, "Use case binding failed", exc)
@@ -129,7 +141,7 @@ class VideoSessionManager @Inject constructor(
     }
 
     private fun setupEncoder() {
-        val format = MediaFormat.createVideoFormat(mimeType, width, height).apply {
+        val format = MediaFormat.createVideoFormat(videoMimeType, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
             setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
@@ -154,12 +166,11 @@ class VideoSessionManager @Inject constructor(
                     val rotatedFormat = MediaFormat().apply {
                         setInteger(MediaFormat.KEY_WIDTH, format.getInteger(MediaFormat.KEY_WIDTH))
                         setInteger(MediaFormat.KEY_HEIGHT, format.getInteger(MediaFormat.KEY_HEIGHT))
-                        setString(MediaFormat.KEY_MIME, mimeType)
+                        setString(MediaFormat.KEY_MIME, videoMimeType)
                         if (format.containsKey("csd-0")) setByteBuffer("csd-0", format.getByteBuffer("csd-0"))
                         if (format.containsKey("csd-1")) setByteBuffer("csd-1", format.getByteBuffer("csd-1"))
-
-                        // 90 degrees rotation for portrait display
-                        setInteger("rotation-degrees", 0)
+                        
+                        setInteger("rotation-degrees", 270)
                     }
                     encoderOutputFormat = rotatedFormat
                     formatLatch.countDown()
@@ -168,6 +179,25 @@ class VideoSessionManager @Inject constructor(
             configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             inputSurface = createInputSurface()
             start()
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startAudioCapture() {
+        try {
+            audioRecord = AudioRecord(audioSource, sampleRate, channelConfig, audioFormat, bufferSize)
+            audioRecord?.startRecording()
+            audioThread = Thread {
+                val audioBuffer = ShortArray(bufferSize)
+                while (!Thread.interrupted()) {
+                    val read = audioRecord?.read(audioBuffer, 0, bufferSize) ?: 0
+                    if (read > 0 && !isMicEnabled) {
+                        for (i in 0 until read) audioBuffer[i] = 0
+                    }
+                }
+            }.apply { start() }
+        } catch (e: Exception) {
+            Log.e(tag, "Audio capture failed", e)
         }
     }
 
@@ -195,12 +225,7 @@ class VideoSessionManager @Inject constructor(
         synchronized(this) {
             decoderHandlers.remove(participantId)?.removeCallbacksAndMessages(null)
             decoders.remove(participantId)?.apply {
-                try {
-                    stop()
-                    release()
-                } catch (e: Exception) {
-                    Log.e(tag, "Error releasing decoder", e)
-                }
+                try { stop(); release() } catch (e: Exception) { }
             }
             decoderThreads.remove(participantId)?.quitSafely()
         }
@@ -208,13 +233,12 @@ class VideoSessionManager @Inject constructor(
 
     private fun setupDecoder(id: String, surface: Surface) {
         val format = encoderOutputFormat ?: return
-        
         val thread = HandlerThread("DecoderThread_$id").apply { start() }
         val handler = Handler(thread.looper)
         decoderThreads[id] = thread
         decoderHandlers[id] = handler
 
-        val decoder = MediaCodec.createDecoderByType(mimeType).apply {
+        val decoder = MediaCodec.createDecoderByType(videoMimeType).apply {
             configure(format, surface, null, 0)
             start()
         }
@@ -230,7 +254,7 @@ class VideoSessionManager @Inject constructor(
                             decoder.releaseOutputBuffer(outIndex, true)
                         }
                         handler.post(this)
-                    } catch (e: Exception) {}
+                    } catch (e: Exception) { }
                 }
             }
         })
@@ -239,7 +263,7 @@ class VideoSessionManager @Inject constructor(
     }
 
     private fun broadcastToDecoders(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
-        decoders.forEach { (id, decoder) ->
+        decoders.forEach { (_, decoder) ->
             try {
                 val index = decoder.dequeueInputBuffer(10000)
                 if (index >= 0) {
@@ -248,19 +272,15 @@ class VideoSessionManager @Inject constructor(
                     inputBuffer?.put(buffer.duplicate())
                     decoder.queueInputBuffer(index, 0, info.size, info.presentationTimeUs, info.flags)
                 }
-            } catch (e: Exception) {}
+            } catch (e: Exception) { }
         }
     }
     
     fun enableVideo(enabled: Boolean, owner: LifecycleOwner) {
-        if (enabled) {
-            bindCameraUseCases(owner)
-        } else {
-            cameraProvider?.unbindAll()
-        }
+        if (enabled) bindCameraUseCases(owner) else cameraProvider?.unbindAll()
     }
     
-    fun enableAudio(enabled: Boolean) {}
+    fun enableAudio(enabled: Boolean) { isMicEnabled = enabled }
 
     @Synchronized
     fun stopSession() {
@@ -268,18 +288,17 @@ class VideoSessionManager @Inject constructor(
         encoder?.stop()
         encoder?.release()
         encoder = null
-
-        decoderHandlers.forEach { (_, handler) -> handler.removeCallbacksAndMessages(null) }
+        audioThread?.interrupt()
+        audioThread = null
+        audioRecord?.stop()
+        audioRecord?.release()
+        audioRecord = null
+        decoderHandlers.forEach { (_, h) -> h.removeCallbacksAndMessages(null) }
         decoderHandlers.clear()
-
-        decoders.forEach { (_, dec) -> 
-            try { dec.stop(); dec.release() } catch(e: Exception) {}
-        }
+        decoders.forEach { (_, d) -> try { d.stop(); d.release() } catch(e: Exception) {} }
         decoders.clear()
-
-        decoderThreads.forEach { (_, thread) -> thread.quitSafely() }
+        decoderThreads.forEach { (_, t) -> t.quitSafely() }
         decoderThreads.clear()
-
         inputSurface?.release()
         inputSurface = null
         _remoteParticipants.value = emptyList()
