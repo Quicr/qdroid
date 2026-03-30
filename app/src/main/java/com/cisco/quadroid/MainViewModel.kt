@@ -35,6 +35,8 @@ class MainViewModel @Inject constructor(
     private val _videoToggleCount = MutableStateFlow(0)
     val videoToggleCount: StateFlow<Int> = _videoToggleCount.asStateFlow()
 
+    val isFrontCamera: StateFlow<Boolean> = videoSessionManager.isFrontCamera
+
     val videoAspectRatio: StateFlow<Float> = videoSessionManager.videoAspectRatio
 
     val remoteParticipants: StateFlow<List<ParticipantStream>> = videoSessionManager.remoteParticipants
@@ -67,6 +69,10 @@ class MainViewModel @Inject constructor(
              _videoToggleCount.value++
         }
         videoSessionManager.enableVideo(newState, lifecycleOwner)
+    }
+
+    fun switchCamera(lifecycleOwner: LifecycleOwner) {
+        videoSessionManager.switchCamera(lifecycleOwner)
     }
 
     fun toggleAudio() {

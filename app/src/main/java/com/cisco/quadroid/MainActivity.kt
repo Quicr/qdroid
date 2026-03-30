@@ -46,6 +46,7 @@ import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.CloudQueue
+import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PersonAdd
@@ -113,16 +114,16 @@ import kotlinx.coroutines.delay
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
-    
+
     private val viewModel: MainViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        
+
         // 8.1 OnCreate - Connect to relay
         viewModel.connectToRelay()
-        
+
         setContent {
             QuadroidTheme {
                 MainScreen(viewModel = viewModel)
@@ -151,6 +152,7 @@ fun MainScreen(viewModel: MainViewModel) {
     val isMicEnabled by viewModel.isMicEnabled.collectAsStateWithLifecycle()
     val isVideoEnabled by viewModel.isVideoEnabled.collectAsStateWithLifecycle()
     val videoToggleCount by viewModel.videoToggleCount.collectAsStateWithLifecycle()
+    val isFrontCamera by viewModel.isFrontCamera.collectAsStateWithLifecycle()
     val videoAspectRatio by viewModel.videoAspectRatio.collectAsStateWithLifecycle()
     val connectionStatus by viewModel.connectionStatus.collectAsStateWithLifecycle()
 
@@ -165,7 +167,7 @@ fun MainScreen(viewModel: MainViewModel) {
     )
 
     var toastMessage by remember { mutableStateOf<String?>(null) }
-    
+
     LaunchedEffect(connectionStatus) {
         toastMessage = "Relay Status: ${connectionStatus.name}"
         delay(3000)
@@ -199,12 +201,14 @@ fun MainScreen(viewModel: MainViewModel) {
                         isMicEnabled = isMicEnabled,
                         isVideoEnabled = isVideoEnabled,
                         videoToggleCount = videoToggleCount,
+                        isFrontCamera = isFrontCamera,
                         videoAspectRatio = videoAspectRatio,
                         onLocalPreviewSurfaceReady = { surface -> viewModel.onLocalPreviewSurfaceReady(surface) },
                         onRemoteSurfaceReady = { id, surface -> viewModel.onRemoteSurfaceReady(id, surface) },
                         onRemoteSurfaceDestroyed = { id -> viewModel.onRemoteSurfaceDestroyed(id) },
                         onAddParticipant = { viewModel.addParticipant() },
                         onToggleVideo = { viewModel.toggleVideo(lifecycleOwner) },
+                        onSwitchCamera = { viewModel.switchCamera(lifecycleOwner) },
                         onToggleAudio = { viewModel.toggleAudio() },
                         onEndCall = { viewModel.endCall() }
                     )
@@ -275,7 +279,7 @@ fun LiquidGlassButton(
         ),
         label = "phase"
     )
-    
+
     // Pulse animation for the border thickness and glow
     val pulse by infiniteTransition.animateFloat(
         initialValue = 0.6f,
@@ -515,12 +519,14 @@ fun InCallScreen(
     isMicEnabled: Boolean,
     isVideoEnabled: Boolean,
     videoToggleCount: Int,
+    isFrontCamera: Boolean,
     videoAspectRatio: Float,
     onLocalPreviewSurfaceReady: (android.view.Surface) -> Unit,
     onRemoteSurfaceReady: (String, android.view.Surface) -> Unit,
     onRemoteSurfaceDestroyed: (String) -> Unit,
     onAddParticipant: () -> Unit,
     onToggleVideo: () -> Unit,
+    onSwitchCamera: () -> Unit,
     onToggleAudio: () -> Unit,
     onEndCall: () -> Unit
 ) {
@@ -549,7 +555,7 @@ fun InCallScreen(
                             onSurfaceCreated = onLocalPreviewSurfaceReady,
                             onSurfaceDestroyed = { },
                             modifier = Modifier.fillMaxSize(),
-                            mirrorHorizontal = true,
+                            mirrorHorizontal = isFrontCamera,
                             aspectRatio = videoAspectRatio
                         )
                     }
@@ -626,6 +632,13 @@ fun InCallScreen(
                         )
                     ) {
                         Icon(imageVector = if (isVideoEnabled) Icons.Default.Videocam else Icons.Default.VideocamOff, contentDescription = null)
+                    }
+
+                    IconButton(
+                        onClick = onSwitchCamera,
+                        colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)
+                    ) {
+                        Icon(Icons.Default.FlipCameraAndroid, contentDescription = "Switch Camera")
                     }
 
                     IconButton(
@@ -713,7 +726,7 @@ fun AdaptiveNativeGrid(
                                 modifier = Modifier.fillMaxSize(),
                                 mirrorHorizontal = true,
                                 aspectRatio = aspectRatio
-                            )
+                              )
                         }
                         Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
                             NativeVideoRenderer(

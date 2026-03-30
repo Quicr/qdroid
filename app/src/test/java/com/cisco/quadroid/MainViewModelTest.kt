@@ -1,8 +1,8 @@
 package com.cisco.quadroid
 
+import androidx.lifecycle.LifecycleOwner
 import app.cash.turbine.test
-import com.cisco.quadroid.webrtc.WebRtcSessionManager
-import io.mockk.every
+import com.cisco.quadroid.mediacodec.VideoSessionManager
 import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
@@ -21,12 +21,13 @@ class MainViewModelTest {
 
     private val testDispatcher = StandardTestDispatcher()
     private lateinit var viewModel: MainViewModel
-    private val webRtcSessionManager: WebRtcSessionManager = mockk(relaxed = true)
+    private val videoSessionManager: VideoSessionManager = mockk(relaxed = true)
+    private val lifecycleOwner: LifecycleOwner = mockk()
 
     @Before
     fun setup() {
         Dispatchers.setMain(testDispatcher)
-        viewModel = MainViewModel(webRtcSessionManager)
+        viewModel = MainViewModel(videoSessionManager)
     }
 
     @After
@@ -40,23 +41,23 @@ class MainViewModelTest {
     }
 
     @Test
-    fun `startCall transitions to InCall and calls setupLocalStream`() = runTest {
+    fun `startCall transitions to InCall and calls startSession`() = runTest {
         viewModel.uiState.test {
             assertEquals(CallUiState.Lobby, awaitItem())
-            viewModel.startCall()
+            viewModel.startCall(lifecycleOwner, 0)
             assertEquals(CallUiState.InCall, awaitItem())
-            verify { webRtcSessionManager.setupLocalStream() }
+            verify { videoSessionManager.startSession(lifecycleOwner, 0, any()) }
         }
     }
 
     @Test
-    fun `endCall transitions back to Lobby and disconnects`() = runTest {
-        viewModel.startCall()
+    fun `endCall transitions back to Lobby and stops session`() = runTest {
+        viewModel.startCall(lifecycleOwner, 0)
         viewModel.uiState.test {
             assertEquals(CallUiState.InCall, awaitItem())
             viewModel.endCall()
             assertEquals(CallUiState.Lobby, awaitItem())
-            verify { webRtcSessionManager.disconnect() }
+            verify { videoSessionManager.stopSession() }
         }
     }
 }

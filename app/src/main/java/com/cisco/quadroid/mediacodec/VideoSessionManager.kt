@@ -74,6 +74,10 @@ class VideoSessionManager @Inject constructor(
     private var cameraProvider: ProcessCameraProvider? = null
     private var lifecycleOwner: LifecycleOwner? = null
     private var rotation: Int = 0
+    private var cameraSelector: CameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+    
+    private val _isFrontCamera = MutableStateFlow(true)
+    val isFrontCamera: StateFlow<Boolean> = _isFrontCamera.asStateFlow()
 
     private var encoder: MediaCodec? = null
     private var inputSurface: Surface? = null
@@ -129,6 +133,8 @@ class VideoSessionManager @Inject constructor(
         audioFormatLatch = CountDownLatch(1)
         primaryRemoteVideoTrack = null
         primaryRemoteAudioTrack = null
+        cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
+        _isFrontCamera.value = true
         
         // Ensure connected if not already
         if (moqTransport.connectionStatus.value != MoqConnectionStatus.CONNECTED) {
@@ -220,13 +226,24 @@ class VideoSessionManager @Inject constructor(
         
         try {
             if (localPreviewSurface != null) {
-                provider.bindToLifecycle(owner, CameraSelector.DEFAULT_FRONT_CAMERA, encoderPreview, localUiPreview)
+                provider.bindToLifecycle(owner, cameraSelector, encoderPreview, localUiPreview)
             } else {
-                provider.bindToLifecycle(owner, CameraSelector.DEFAULT_FRONT_CAMERA, encoderPreview)
+                provider.bindToLifecycle(owner, cameraSelector, encoderPreview)
             }
         } catch (exc: Exception) {
             Log.e(tag, "Use case binding failed", exc)
         }
+    }
+
+    fun switchCamera(owner: LifecycleOwner) {
+        cameraSelector = if (cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA) {
+            _isFrontCamera.value = false
+            CameraSelector.DEFAULT_BACK_CAMERA
+        } else {
+            _isFrontCamera.value = true
+            CameraSelector.DEFAULT_FRONT_CAMERA
+        }
+        bindCameraUseCases(owner)
     }
 
     fun setLocalPreviewSurface(surface: Surface) {
