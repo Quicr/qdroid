@@ -149,7 +149,7 @@ fun MainScreen(viewModel: MainViewModel) {
                         onLocalPreviewSurfaceReady = { surface -> viewModel.onLocalPreviewSurfaceReady(surface) },
                         onRemoteSurfaceReady = { id, surface -> viewModel.onRemoteSurfaceReady(id, surface) },
                         onRemoteSurfaceDestroyed = { id -> viewModel.onRemoteSurfaceDestroyed(id) },
-                        onSimulateParticipant = { viewModel.simulateParticipant() },
+                        onAddParticipant = { viewModel.addParticipant() },
                         onToggleVideo = { viewModel.toggleVideo(lifecycleOwner) },
                         onToggleAudio = { viewModel.toggleAudio() },
                         onEndCall = { viewModel.endCall() }
@@ -250,7 +250,7 @@ fun InCallScreen(
     onLocalPreviewSurfaceReady: (android.view.Surface) -> Unit,
     onRemoteSurfaceReady: (String, android.view.Surface) -> Unit,
     onRemoteSurfaceDestroyed: (String) -> Unit,
-    onSimulateParticipant: () -> Unit,
+    onAddParticipant: () -> Unit,
     onToggleVideo: () -> Unit,
     onToggleAudio: () -> Unit,
     onEndCall: () -> Unit
@@ -362,7 +362,7 @@ fun InCallScreen(
                     horizontalArrangement = Arrangement.spacedBy(20.dp)
                 ) {
                     IconButton(
-                        onClick = onSimulateParticipant,
+                        onClick = onAddParticipant,
                         colors = IconButtonDefaults.iconButtonColors(contentColor = Color.White)
                     ) {
                         Icon(Icons.Default.PersonAdd, contentDescription = "Add Participant")

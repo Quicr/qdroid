@@ -17,6 +17,10 @@ class MainViewModel @Inject constructor(
     private val videoSessionManager: VideoSessionManager
 ) : ViewModel() {
 
+    //Relay config - TODO - This should come in via catalog
+    var relay_url:String = "moq://eng-3.us-west-2.m10x.org:33660"
+
+
     private val _uiState = MutableStateFlow<CallUiState>(CallUiState.Lobby)
     val uiState: StateFlow<CallUiState> = _uiState.asStateFlow()
 
@@ -35,7 +39,7 @@ class MainViewModel @Inject constructor(
 
     fun startCall(lifecycleOwner: LifecycleOwner, rotation: Int) {
         viewModelScope.launch {
-            videoSessionManager.startSession(lifecycleOwner, rotation)
+            videoSessionManager.startSession(lifecycleOwner, rotation, relay_url)
             _uiState.value = CallUiState.InCall
         }
     }
@@ -55,8 +59,8 @@ class MainViewModel @Inject constructor(
         videoSessionManager.enableAudio(newState)
     }
 
-    fun simulateParticipant() {
-        videoSessionManager.addSimulatedParticipant()
+    fun addParticipant() {
+        videoSessionManager.addParticipant()
     }
 
     fun onLocalPreviewSurfaceReady(surface: android.view.Surface) {
