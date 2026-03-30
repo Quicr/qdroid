@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "quadroid"
+rootProject.name = "Quadroid"
 include(":app")
