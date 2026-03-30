@@ -21,6 +21,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.cisco.quadroid.transport.MoqAudioFramer
+import com.cisco.quadroid.transport.MoqConnectionStatus
 import com.cisco.quadroid.transport.MoqMediaFramer
 import com.cisco.quadroid.transport.MoqObjectCallback
 import com.cisco.quadroid.transport.MoqTransport
@@ -111,6 +112,16 @@ class VideoSessionManager @Inject constructor(
     private var primaryRemoteVideoTrack: String? = null
     private var primaryRemoteAudioTrack: String? = null
 
+    val connectionStatus: StateFlow<MoqConnectionStatus> = moqTransport.connectionStatus
+
+    fun connectToRelay(url: String) {
+        moqTransport.connect(url)
+    }
+
+    fun disconnectFromRelay() {
+        moqTransport.disconnect()
+    }
+
     fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String) {
         this.lifecycleOwner = lifecycleOwner
         this.rotation = rotation
@@ -119,7 +130,10 @@ class VideoSessionManager @Inject constructor(
         primaryRemoteVideoTrack = null
         primaryRemoteAudioTrack = null
         
-        moqTransport.connect(relayUrl)
+        // Ensure connected if not already
+        if (moqTransport.connectionStatus.value != MoqConnectionStatus.CONNECTED) {
+            moqTransport.connect(relayUrl)
+        }
         
         moqTransport.publish(localVideoTrackName)
         videoFramer = MoqMediaFramer(moqTransport, localVideoTrackName)
@@ -502,7 +516,7 @@ class VideoSessionManager @Inject constructor(
 
     @Synchronized
     fun stopSession() {
-        moqTransport.disconnect()
+        // REMOVED: moqTransport.disconnect() - Connection should persist for app lifecycle
         cameraProvider?.unbindAll()
         
         encoderHandler.removeCallbacksAndMessages(null)

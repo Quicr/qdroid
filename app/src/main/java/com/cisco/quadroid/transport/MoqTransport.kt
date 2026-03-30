@@ -1,11 +1,21 @@
 package com.cisco.quadroid.transport
 
+import kotlinx.coroutines.flow.StateFlow
 import java.nio.ByteBuffer
+
+enum class MoqConnectionStatus {
+    IDLE, CONNECTING, CONNECTED, DISCONNECTED, ERROR
+}
 
 /**
  * High-level interface for Media over QUIC (MoQ) transport.
  */
 interface MoqTransport {
+
+    /**
+     * Current connection status to the MoQ relay.
+     */
+    val connectionStatus: StateFlow<MoqConnectionStatus>
 
     /**
      * Connects to a MoQ relay.

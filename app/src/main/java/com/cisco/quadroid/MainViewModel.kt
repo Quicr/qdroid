@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.cisco.quadroid.mediacodec.ParticipantStream
 import com.cisco.quadroid.mediacodec.VideoSessionManager
+import com.cisco.quadroid.transport.MoqConnectionStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -19,6 +20,7 @@ class MainViewModel @Inject constructor(
 
     //Relay config - TODO - This should come in via catalog
     var relay_url:String = "moq://eng-3.us-west-2.m10x.org:33660"
+    private var last_connected_url: String? = null
 
 
     private val _uiState = MutableStateFlow<CallUiState>(CallUiState.Lobby)
@@ -36,6 +38,20 @@ class MainViewModel @Inject constructor(
     val videoAspectRatio: StateFlow<Float> = videoSessionManager.videoAspectRatio
 
     val remoteParticipants: StateFlow<List<ParticipantStream>> = videoSessionManager.remoteParticipants
+
+    val connectionStatus: StateFlow<MoqConnectionStatus> = videoSessionManager.connectionStatus
+
+    fun connectToRelay() {
+        if (relay_url != last_connected_url || videoSessionManager.connectionStatus.value == MoqConnectionStatus.DISCONNECTED || videoSessionManager.connectionStatus.value == MoqConnectionStatus.IDLE) {
+            videoSessionManager.connectToRelay(relay_url)
+            last_connected_url = relay_url
+        }
+    }
+
+    fun disconnectFromRelay() {
+        videoSessionManager.disconnectFromRelay()
+        last_connected_url = null
+    }
 
     fun startCall(lifecycleOwner: LifecycleOwner, rotation: Int) {
         viewModelScope.launch {
@@ -88,6 +104,8 @@ class MainViewModel @Inject constructor(
 
     fun saveSettings() {
         _uiState.value = CallUiState.Lobby
+        // Trigger reconnect if URL changed in settings
+        connectToRelay()
     }
 }
 

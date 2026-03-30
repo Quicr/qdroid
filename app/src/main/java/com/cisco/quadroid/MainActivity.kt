@@ -7,6 +7,14 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -19,6 +27,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -34,15 +43,21 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CallEnd
+import androidx.compose.material.icons.filled.CloudDone
+import androidx.compose.material.icons.filled.CloudOff
+import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -50,6 +65,7 @@ import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
@@ -59,6 +75,8 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -67,9 +85,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.drawOutline
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -78,11 +103,13 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.cisco.quadroid.mediacodec.ParticipantStream
+import com.cisco.quadroid.transport.MoqConnectionStatus
 import com.cisco.quadroid.ui.components.NativeVideoRenderer
 import com.cisco.quadroid.ui.theme.QuadroidTheme
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.delay
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
@@ -92,11 +119,27 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        
+        // 8.1 OnCreate - Connect to relay
+        viewModel.connectToRelay()
+        
         setContent {
             QuadroidTheme {
                 MainScreen(viewModel = viewModel)
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 8.3 Ensure connection is maintained on resume
+        viewModel.connectToRelay()
+    }
+
+    override fun onDestroy() {
+        // 8.2 OnDestroy - Disconnect from the relay
+        viewModel.disconnectFromRelay()
+        super.onDestroy()
     }
 }
 
@@ -109,6 +152,7 @@ fun MainScreen(viewModel: MainViewModel) {
     val isVideoEnabled by viewModel.isVideoEnabled.collectAsStateWithLifecycle()
     val videoToggleCount by viewModel.videoToggleCount.collectAsStateWithLifecycle()
     val videoAspectRatio by viewModel.videoAspectRatio.collectAsStateWithLifecycle()
+    val connectionStatus by viewModel.connectionStatus.collectAsStateWithLifecycle()
 
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
@@ -120,6 +164,14 @@ fun MainScreen(viewModel: MainViewModel) {
         )
     )
 
+    var toastMessage by remember { mutableStateOf<String?>(null) }
+    
+    LaunchedEffect(connectionStatus) {
+        toastMessage = "Relay Status: ${connectionStatus.name}"
+        delay(3000)
+        toastMessage = null
+    }
+
     Surface(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
@@ -128,6 +180,7 @@ fun MainScreen(viewModel: MainViewModel) {
             when (uiState) {
                 is CallUiState.Lobby -> {
                     LobbyScreen(
+                        connectionStatus = connectionStatus,
                         onStartCall = {
                             if (permissionsState.allPermissionsGranted) {
                                 val rotation = context.display?.rotation ?: 0
@@ -141,6 +194,7 @@ fun MainScreen(viewModel: MainViewModel) {
                 }
                 is CallUiState.InCall -> {
                     InCallScreen(
+                        connectionStatus = connectionStatus,
                         remoteParticipants = remoteParticipants,
                         isMicEnabled = isMicEnabled,
                         isVideoEnabled = isVideoEnabled,
@@ -161,15 +215,165 @@ fun MainScreen(viewModel: MainViewModel) {
                     )
                 }
             }
+
+            // 3. Connection Toast (Transparent Glass UX) - Bottom Center
+            AnimatedVisibility(
+                visible = toastMessage != null,
+                enter = fadeIn() + slideInVertically(initialOffsetY = { it }),
+                exit = fadeOut() + slideOutVertically(targetOffsetY = { it }),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 100.dp)
+                    .zIndex(10f)
+            ) {
+                toastMessage?.let { msg ->
+                    GlassToast(message = msg)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun GlassToast(message: String) {
+    // 2. Add more blur effect simulation for GlassToast
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(24.dp))
+            .background(Color.White.copy(alpha = 0.05f))
+            .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(24.dp))
+    ) {
+        Box(
+            modifier = Modifier
+                .background(Color.White.copy(alpha = 0.25f)) // Increased opacity for better frost effect
+                .padding(horizontal = 24.dp, vertical = 12.dp)
+        ) {
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.9f),
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+@Composable
+fun LiquidGlassButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    content: @Composable RowScope.() -> Unit
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "liquid_transition")
+    val phase by infiniteTransition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(4000, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "phase"
+    )
+    
+    // Pulse animation for the border thickness and glow
+    val pulse by infiniteTransition.animateFloat(
+        initialValue = 0.6f,
+        targetValue = 1.2f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(2500, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse"
+    )
+
+    // AI Mode Colors
+    val aiColors = listOf(
+        Color(0xFF4285F4), // Blue
+        Color(0xFF9171E5), // Purple
+        Color(0xFFF24E1E), // Red
+        Color(0xFFF9D523), // Yellow
+        Color(0xFF4285F4)  // Blue again
+    )
+
+    // Refined minimalistic glass palette: "Arctic Frost"
+    val backgroundBrush = if (enabled) {
+        Brush.linearGradient(
+            colors = listOf(
+                Color.White.copy(alpha = 0.12f + (0.08f * phase)),
+                Color.White.copy(alpha = 0.04f + (0.02f * (1f - phase)))
+            )
+        )
+    } else {
+        Brush.linearGradient(
+            colors = listOf(
+                Color.Gray.copy(alpha = 0.1f),
+                Color.Gray.copy(alpha = 0.05f)
+            )
+        )
+    }
+
+    val contentAlpha by animateFloatAsState(if (enabled) 1f else 0.4f, label = "contentAlpha")
+
+    Box(
+        modifier = modifier
+            .height(64.dp)
+            .clip(RoundedCornerShape(32.dp))
+            .background(backgroundBrush)
+            .then(
+                if (enabled) {
+                    Modifier.drawWithContent {
+                        drawContent()
+                        // Pulsing stroke width - Doubled base thickness
+                        val strokeWidth = (3.0.dp * pulse).toPx()
+                        val brush = Brush.sweepGradient(
+                            colors = aiColors.map { it.copy(alpha = pulse.coerceIn(0.5f, 1f)) },
+                            center = Offset(size.width / 2, size.height / 2)
+                        )
+                        // Removed rotation to keep border from moving around
+                        drawOutline(
+                            outline = Outline.Rounded(
+                                RoundRect(
+                                    rect = Rect(Offset.Zero, size),
+                                    cornerRadius = CornerRadius(32.dp.toPx())
+                                )
+                            ),
+                            brush = brush,
+                            style = Stroke(width = strokeWidth)
+                        )
+                    }
+                } else {
+                    Modifier.border(
+                        width = 0.5.dp,
+                        color = Color.White.copy(alpha = 0.1f),
+                        shape = RoundedCornerShape(32.dp)
+                    )
+                }
+            )
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 24.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface.copy(alpha = contentAlpha)) {
+                content()
+            }
         }
     }
 }
 
 @Composable
 fun LobbyScreen(
+    connectionStatus: MoqConnectionStatus,
     onStartCall: () -> Unit,
     onNavigateToSettings: () -> Unit
 ) {
+    val isConnected = connectionStatus == MoqConnectionStatus.CONNECTED
+    val isConnecting = connectionStatus == MoqConnectionStatus.CONNECTING || connectionStatus == MoqConnectionStatus.IDLE
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -192,7 +396,7 @@ fun LobbyScreen(
             Icon(
                 imageVector = Icons.Default.Settings,
                 contentDescription = "Settings",
-                tint = MaterialTheme.colorScheme.primary
+                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
             )
         }
 
@@ -210,30 +414,49 @@ fun LobbyScreen(
                 ),
                 color = MaterialTheme.colorScheme.onBackground
             )
-            
-            Spacer(modifier = Modifier.height(80.dp))
 
-            GlassCard(
+            Text(
+                text = "Media over QUIC Video",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.5f)
+            )
+
+            Spacer(modifier = Modifier.height(100.dp))
+
+            // 1, 4 & 5. Liquid Glass Button: Material You, Minimalistic
+            LiquidGlassButton(
                 onClick = onStartCall,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(180.dp)
+                enabled = isConnected,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Videocam,
-                            contentDescription = null,
-                            modifier = Modifier.size(32.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Text(
-                            text = "Join Meeting",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
+                Icon(
+                    imageVector = Icons.Default.Videocam,
+                    contentDescription = null,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = "Join Meeting",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // Revolving progress bar below button
+            if (!isConnected) {
+                Spacer(modifier = Modifier.height(32.dp))
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(32.dp),
+                        strokeWidth = 3.dp,
+                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = if (isConnecting) "Connecting to MoQ Relay..." else "Connection failed. Retrying...",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
                 }
             }
         }
@@ -241,7 +464,53 @@ fun LobbyScreen(
 }
 
 @Composable
+fun ConnectionStatusIcon(status: MoqConnectionStatus, modifier: Modifier = Modifier) {
+    val color by animateColorAsState(
+        targetValue = when (status) {
+            MoqConnectionStatus.CONNECTED -> Color(0xFF4CAF50)
+            MoqConnectionStatus.CONNECTING -> Color(0xFFFFC107)
+            MoqConnectionStatus.ERROR -> Color(0xFFF44336)
+            else -> Color.Gray
+        },
+        label = "connection_color"
+    )
+
+    val icon = when (status) {
+        MoqConnectionStatus.CONNECTED -> Icons.Default.CloudDone
+        MoqConnectionStatus.CONNECTING -> Icons.Default.Sync
+        MoqConnectionStatus.ERROR -> Icons.Default.CloudOff
+        else -> Icons.Default.CloudQueue
+    }
+
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.White.copy(alpha = 0.15f))
+            .border(0.5.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = color,
+                modifier = Modifier.size(14.dp)
+            )
+            Text(
+                text = status.name,
+                style = MaterialTheme.typography.labelSmall,
+                color = color.copy(alpha = 0.9f),
+                fontWeight = FontWeight.ExtraBold,
+                letterSpacing = 0.5.sp
+            )
+        }
+    }
+}
+
+@Composable
 fun InCallScreen(
+    connectionStatus: MoqConnectionStatus,
     remoteParticipants: List<ParticipantStream>,
     isMicEnabled: Boolean,
     isVideoEnabled: Boolean,
@@ -271,7 +540,7 @@ fun InCallScreen(
                 showControls = !showControls
             }
     ) {
-        // 1. Video Participants
+        // Video Participants
         Box(modifier = Modifier.fillMaxSize()) {
             if (remoteParticipants.isEmpty()) {
                 if (isVideoEnabled) {
@@ -286,7 +555,7 @@ fun InCallScreen(
                     }
                 } else {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.VideocamOff, contentDescription = null, tint = Color.White.copy(alpha = 0.5f), modifier = Modifier.size(64.dp))
+                        Icon(Icons.Default.VideocamOff, contentDescription = null, tint = Color.White.copy(alpha = 0.3f), modifier = Modifier.size(64.dp))
                     }
                 }
             } else {
@@ -300,46 +569,17 @@ fun InCallScreen(
             }
         }
 
-        // 2. Local PIP
-        if (remoteParticipants.isNotEmpty()) {
-            AnimatedVisibility(
-                visible = showControls,
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .statusBarsPadding()
-                    .padding(16.dp)
-                    .zIndex(1f),
-                enter = fadeIn(),
-                exit = fadeOut()
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(if (isLandscape) 140.dp else 100.dp, if (isLandscape) 90.dp else 150.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
-                        .background(Color.Black.copy(alpha = 0.2f))
-                ) {
-                    if (isVideoEnabled) {
-                        key(videoToggleCount) {
-                            NativeVideoRenderer(
-                                onSurfaceCreated = onLocalPreviewSurfaceReady,
-                                onSurfaceDestroyed = { },
-                                modifier = Modifier.fillMaxSize(),
-                                zOrderMediaOverlay = true,
-                                mirrorHorizontal = true,
-                                aspectRatio = videoAspectRatio
-                            )
-                        }
-                    } else {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            Icon(Icons.Default.VideocamOff, contentDescription = null, tint = Color.White.copy(alpha = 0.5f))
-                        }
-                    }
-                }
-            }
-        }
+        // 6. Connection Status (Top Right Glass Icon)
+        ConnectionStatusIcon(
+            status = connectionStatus,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(16.dp)
+                .zIndex(3f)
+        )
 
-        // 3. Floating Control Bar
+        // Floating Control Bar
         AnimatedVisibility(
             visible = showControls,
             enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
@@ -600,20 +840,6 @@ fun SettingsCardSection(header: String, content: @Composable () -> Unit) {
     ) {
         Column {
             Text(header, style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(16.dp), color = MaterialTheme.colorScheme.primary)
-            content()
-        }
-    }
-}
-
-@Composable
-fun GlassCard(onClick: () -> Unit, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    Card(
-        onClick = onClick,
-        modifier = modifier,
-        shape = RoundedCornerShape(32.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f))
-    ) {
-        Box(modifier = Modifier.fillMaxSize().border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(32.dp))) {
             content()
         }
     }
