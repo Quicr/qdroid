@@ -20,13 +20,21 @@ interface MoqTransport {
     /**
      * Connects to a MoQ relay.
      * @param url The relay URL (e.g., moq://relay.example.com:443)
+     * @param deviceId Unique identifier for this device/endpoint.
      */
-    fun connect(url: String)
+    fun connect(url: String, deviceId: String)
 
     /**
      * Disconnects from the relay.
      */
     fun disconnect()
+
+    /**
+     * Announces a namespace to the relay.
+     * Should be called before publishing tracks within that namespace.
+     * @param namespacePrefix The namespace prefix (e.g., "quadroid/video")
+     */
+    fun publishNamespace(namespacePrefix: String)
 
     /**
      * Publishes a track.

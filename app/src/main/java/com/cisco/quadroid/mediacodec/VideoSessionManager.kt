@@ -26,6 +26,7 @@ import com.cisco.quadroid.transport.MoqMediaFramer
 import com.cisco.quadroid.transport.MoqObjectCallback
 import com.cisco.quadroid.transport.MoqTransport
 import com.cisco.quadroid.transport.NamespaceSubscriptionCallback
+import com.cisco.quadroid.util.DeviceIdentifier
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -109,8 +110,17 @@ class VideoSessionManager @Inject constructor(
     private var localPreviewSurface: Surface? = null
     
     private var videoFramer: MoqMediaFramer? = null
-    private val localVideoTrackName = "quadroid/video/${UUID.randomUUID()}"
-    private val localAudioTrackName = "quadroid/audio/${UUID.randomUUID()}"
+    private val localVideoTrackName = "webex.com/meeting123/alice/video"
+    private val localAudioTrackName = "webex.com/meeting123/alice/audio"
+    private val namespace: String = localVideoTrackName.substringBeforeLast("/")
+
+    private val otherVideoTrackName = "webex.com/meeting123/bob/video"
+    private val otherAudioTrackName = "webex.com/meeting123/bob/audio"
+    private val otherNamespace = otherVideoTrackName.substringBeforeLast("/")
+
+
+
+
 
     // Tracks the first real remote participant to duplicate for "addParticipant"
     private var primaryRemoteVideoTrack: String? = null
@@ -119,7 +129,8 @@ class VideoSessionManager @Inject constructor(
     val connectionStatus: StateFlow<MoqConnectionStatus> = moqTransport.connectionStatus
 
     fun connectToRelay(url: String) {
-        moqTransport.connect(url)
+        val deviceId = DeviceIdentifier.get(context)
+        moqTransport.connect(url, deviceId)
     }
 
     fun disconnectFromRelay() {
@@ -138,9 +149,25 @@ class VideoSessionManager @Inject constructor(
         
         // Ensure connected if not already
         if (moqTransport.connectionStatus.value != MoqConnectionStatus.CONNECTED) {
-            moqTransport.connect(relayUrl)
+            connectToRelay(relayUrl)
         }
-        
+
+        moqTransport.subscribeNamespace(otherNamespace, object : NamespaceSubscriptionCallback {
+            override fun onMatch(trackName: String): Boolean {
+                return if (trackName != otherVideoTrackName) {
+                    if (primaryRemoteVideoTrack == null) primaryRemoteVideoTrack = trackName
+                    addRemoteVideoParticipant(trackName)
+                    true
+                } else {
+                    false
+                }
+            }
+        })
+
+
+        //moqTransport.publishNamespace(namespace)
+
+
         moqTransport.publish(localVideoTrackName)
         videoFramer = MoqMediaFramer(moqTransport, localVideoTrackName)
         
@@ -151,30 +178,6 @@ class VideoSessionManager @Inject constructor(
         setupAudioEncoder()
         setupCamera(lifecycleOwner)
         startAudioCapture()
-        
-        moqTransport.subscribeNamespace("quadroid/video/", object : NamespaceSubscriptionCallback {
-            override fun onMatch(trackName: String): Boolean {
-                return if (trackName != localVideoTrackName) {
-                    if (primaryRemoteVideoTrack == null) primaryRemoteVideoTrack = trackName
-                    addRemoteVideoParticipant(trackName)
-                    true
-                } else {
-                    false
-                }
-            }
-        })
-
-        moqTransport.subscribeNamespace("quadroid/audio/", object : NamespaceSubscriptionCallback {
-            override fun onMatch(trackName: String): Boolean {
-                return if (trackName != localAudioTrackName) {
-                    if (primaryRemoteAudioTrack == null) primaryRemoteAudioTrack = trackName
-                    addRemoteAudioParticipant(trackName)
-                    true
-                } else {
-                    false
-                }
-            }
-        })
     }
 
     fun addParticipant() {

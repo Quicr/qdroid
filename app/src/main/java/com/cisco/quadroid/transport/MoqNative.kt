@@ -9,11 +9,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Native implementation of MoqTransport using libquicr via JNI.
  */
-class MoqNative : MoqTransport {
+class MoqNative : MoqTransport, MoqObjectCallback {
     
     companion object {
         private const val TAG = "MoqNative"
@@ -26,8 +27,11 @@ class MoqNative : MoqTransport {
     private val _connectionStatus = MutableStateFlow(MoqConnectionStatus.IDLE)
     override val connectionStatus: StateFlow<MoqConnectionStatus> = _connectionStatus.asStateFlow()
     private var connectionJob: Job? = null
+    
+    // Map of track names to their specific callbacks for routing
+    private val trackCallbacks = ConcurrentHashMap<String, MoqObjectCallback>()
 
-    override fun connect(url: String) {
+    override fun connect(url: String, deviceId: String) {
         connectionJob?.cancel()
         connectionJob = CoroutineScope(Dispatchers.IO).launch {
             _connectionStatus.value = MoqConnectionStatus.CONNECTING
@@ -36,7 +40,7 @@ class MoqNative : MoqTransport {
                 // 1. Create AndroidMoqClient
                 // 2. Call Connect() on libquicr client
                 // 3. Status updates will come via onConnectionStatusChanged callback
-                val ptr = nativeConnect(url)
+                val ptr = nativeConnect(url, deviceId)
                 if (ptr == 0L) {
                     Log.e(TAG, "Native connect failed to initialize")
                     _connectionStatus.value = MoqConnectionStatus.ERROR
@@ -66,6 +70,18 @@ class MoqNative : MoqTransport {
         }
     }
 
+    // Called by JNI for auto-subscribed tracks where MoqNative instance is the default callback
+    @Suppress("unused") // Called from native code
+    override fun onObject(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer) {
+        // Route to specific callback if registered, otherwise log it
+        val callback = trackCallbacks[trackName]
+        if (callback != null) {
+            callback.onObject(trackName, groupId, objectId, payload)
+        } else {
+            Log.d(TAG, "onObject: No callback registered for track=$trackName group=$groupId object=$objectId")
+        }
+    }
+
     override fun disconnect() {
         connectionJob?.cancel()
         if (nativePtr != 0L) {
@@ -73,6 +89,11 @@ class MoqNative : MoqTransport {
             nativePtr = 0
         }
         _connectionStatus.value = MoqConnectionStatus.DISCONNECTED
+        trackCallbacks.clear()
+    }
+
+    override fun publishNamespace(namespacePrefix: String) {
+        if (nativePtr != 0L) nativePublishNamespace(nativePtr, namespacePrefix)
     }
 
     override fun publish(trackName: String, options: PublishOptions) {
@@ -106,6 +127,7 @@ class MoqNative : MoqTransport {
     }
 
     override fun subscribe(trackName: String, callback: MoqObjectCallback) {
+        trackCallbacks[trackName] = callback
         if (nativePtr != 0L) nativeSubscribe(nativePtr, trackName, callback)
     }
 
@@ -118,9 +140,11 @@ class MoqNative : MoqTransport {
     }
 
     // Native methods
-    private external fun nativeConnect(url: String): Long
+    private external fun nativeConnect(url: String, deviceId: String): Long
     private external fun nativeDisconnect(ptr: Long)
+    private external fun nativePublishNamespace(ptr: Long, namespacePrefix: String)
     private external fun nativePublish(ptr: Long, trackName: String, priority: Int, useDatagram: Boolean)
+    private external fun nativeUnpublish(ptr: Long, trackName: String)
     private external fun nativeSendObject(
         ptr: Long,
         trackName: String,
@@ -133,6 +157,7 @@ class MoqNative : MoqTransport {
         useDatagram: Boolean
     )
     private external fun nativeSubscribe(ptr: Long, trackName: String, callback: MoqObjectCallback)
+    private external fun nativeUnsubscribe(ptr: Long, trackName: String)
     private external fun nativeSubscribeNamespace(ptr: Long, namespacePrefix: String, callback: NamespaceSubscriptionCallback)
     private external fun nativeSetNamespaceDefaultBehavior(ptr: Long, acceptAll: Boolean)
 }

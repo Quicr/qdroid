@@ -107,6 +107,7 @@ import com.cisco.quadroid.mediacodec.ParticipantStream
 import com.cisco.quadroid.transport.MoqConnectionStatus
 import com.cisco.quadroid.ui.components.NativeVideoRenderer
 import com.cisco.quadroid.ui.theme.QuadroidTheme
+import com.cisco.quadroid.util.DeviceIdentifier
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import dagger.hilt.android.AndroidEntryPoint
@@ -121,6 +122,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        // Initialize/Restore Device ID
+        DeviceIdentifier.get(this)
+
         // 8.1 OnCreate - Connect to relay
         viewModel.connectToRelay()
 
@@ -133,8 +137,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Ensure Device ID is initialized/restored
+        DeviceIdentifier.get(this)
+        
         // 8.3 Ensure connection is maintained on resume
         viewModel.connectToRelay()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Save Device ID to persistent storage
+        DeviceIdentifier.saveToPrefs(this)
     }
 
     override fun onDestroy() {
