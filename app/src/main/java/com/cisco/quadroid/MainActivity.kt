@@ -228,6 +228,8 @@ fun MainScreen(viewModel: MainViewModel) {
                 }
                 is CallUiState.Settings -> {
                     SettingsScreen(
+                        relayUrl = viewModel.relay_url,
+                        onRelayUrlChange = { viewModel.relay_url = it },
                         onSave = { viewModel.saveSettings() }
                     )
                 }
@@ -241,7 +243,7 @@ fun MainScreen(viewModel: MainViewModel) {
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 100.dp)
-                    .zIndex(20f)
+                    .zIndex(10f)
             ) {
                 toastMessage?.let { msg ->
                     GlassToast(message = msg)
@@ -797,19 +799,26 @@ fun AdaptiveNativeGrid(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onSave: () -> Unit) {
-    var setting1 by remember { mutableStateOf("") }
-    var setting2 by remember { mutableStateOf("") }
-    var radioOption by remember { mutableStateOf("Peer-to-Peer") }
-    var toggleState by remember { mutableStateOf(true) }
+fun SettingsScreen(
+    relayUrl: String,
+    onRelayUrlChange: (String) -> Unit,
+    onSave: () -> Unit
+) {
+    val predefinedUrls = listOf(
+        "moq://eng-1.us-west-2.m10x.org:33440",
+        "moq://eng-3.us-west-2.m10x.org:33550",
+        "moq://eng-3.us-west-2.m10x.org:33660",
+        "moq://relay.us-west-2.m10x.org:33437"
+    )
+    
     var expanded by remember { mutableStateOf(false) }
-    val qualityOptions = listOf("Standard", "High Definition", "Ultra HD")
-    var selectedQuality by remember { mutableStateOf(qualityOptions[0]) }
+    var isCustomUrl by remember { mutableStateOf(!predefinedUrls.contains(relayUrl)) }
+    var customUrlText by remember { mutableStateOf(if (isCustomUrl) relayUrl else "") }
 
     Scaffold(
         topBar = {
-            @OptIn(ExperimentalMaterial3Api::class)
             TopAppBar(
                 title = { Text("Settings", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
@@ -828,19 +837,64 @@ fun SettingsScreen(onSave: () -> Unit) {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            SettingsCardSection(header = "Settings 1") {
-                OutlinedTextField(
-                    value = setting1,
-                    onValueChange = { setting1 = it },
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    label = { Text("User Name") }
-                )
+            SettingsCardSection(header = "Relay URL") {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    ExposedDropdownMenuBox(
+                        expanded = expanded,
+                        onExpandedChange = { expanded = !expanded }
+                    ) {
+                        OutlinedTextField(
+                            value = if (isCustomUrl) "Custom URL" else relayUrl,
+                            onValueChange = {},
+                            readOnly = true,
+                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                            modifier = Modifier.menuAnchor().fillMaxWidth(),
+                            label = { Text("Select Relay") }
+                        )
+                        ExposedDropdownMenu(
+                            expanded = expanded,
+                            onDismissRequest = { expanded = false }
+                        ) {
+                            predefinedUrls.forEach { url ->
+                                DropdownMenuItem(
+                                    text = { Text(url) },
+                                    onClick = {
+                                        onRelayUrlChange(url)
+                                        isCustomUrl = false
+                                        expanded = false
+                                    }
+                                )
+                            }
+                            DropdownMenuItem(
+                                text = { Text("Custom URL...") },
+                                onClick = {
+                                    isCustomUrl = true
+                                    expanded = false
+                                }
+                            )
+                        }
+                    }
+
+                    if (isCustomUrl) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                        OutlinedTextField(
+                            value = customUrlText,
+                            onValueChange = {
+                                customUrlText = it
+                                onRelayUrlChange(it)
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Enter Custom Relay URL") },
+                            placeholder = { Text("moq://...") }
+                        )
+                    }
+                }
             }
 
             SettingsCardSection(header = "Settings 2") {
                 OutlinedTextField(
-                    value = setting2,
-                    onValueChange = { setting2 = it },
+                    value = "",
+                    onValueChange = { },
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
                     label = { Text("Meeting ID") }
                 )
@@ -849,11 +903,11 @@ fun SettingsScreen(onSave: () -> Unit) {
             SettingsCardSection(header = "Connection") {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(selected = radioOption == "Peer-to-Peer", onClick = { radioOption = "Peer-to-Peer" })
+                        RadioButton(selected = true, onClick = { })
                         Text("Peer-to-Peer")
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(selected = radioOption == "Server-Relay", onClick = { radioOption = "Server-Relay" })
+                        RadioButton(selected = false, onClick = { })
                         Text("Server-Relay")
                     }
                 }
@@ -866,27 +920,7 @@ fun SettingsScreen(onSave: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("Noise Cancellation")
-                    Switch(checked = toggleState, onCheckedChange = { toggleState = it })
-                }
-            }
-
-            SettingsCardSection(header = "Quality") {
-                Box(modifier = Modifier.padding(16.dp)) {
-                    @OptIn(ExperimentalMaterial3Api::class)
-                    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = !expanded }) {
-                        OutlinedTextField(
-                            value = selectedQuality,
-                            onValueChange = {},
-                            readOnly = true,
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                            modifier = Modifier.menuAnchor().fillMaxWidth()
-                        )
-                        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                            qualityOptions.forEach { option ->
-                                DropdownMenuItem(text = { Text(option) }, onClick = { selectedQuality = option; expanded = false })
-                            }
-                        }
-                    }
+                    Switch(checked = true, onCheckedChange = { })
                 }
             }
 
