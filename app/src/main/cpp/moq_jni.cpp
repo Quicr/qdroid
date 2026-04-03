@@ -4,9 +4,11 @@
 #include <thread>
 #include <unordered_map>
 #include <mutex>
+#include <vector>
 #include <android/log.h>
 #include <quicr/client.h>
 #include <quicr/object.h>
+#include "moq_util.h"
 
 #define LOG_TAG "MoqJni"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -177,6 +179,9 @@ public:
 
     void ObjectReceived(const quicr::ObjectHeaders& hdr, quicr::BytesSpan data) override
     {
+        LOGI("ObjectReceived: group_id=%llu object_id=%llu payload_length=%llu",
+             hdr.group_id, hdr.object_id, hdr.payload_length);
+
         if (!callback_ref_) {
             LOGE("No callback reference for ObjectReceived");
             return;
@@ -294,6 +299,8 @@ public:
             new AndroidSubscribeNamespaceHandler(prefix, callback_ref));
     }
 
+    jobject GetCallbackRef() const { return callback_ref_; }
+
 private:
     jobject callback_ref_;
 };
@@ -403,6 +410,33 @@ public:
                      publish_attributes,
                      { .reason_code = quicr::PublishResponse::ReasonCode::kOk },
                      std::move(handler));
+
+        // Invoke onMatch if ns_handler is available
+        if (auto shared_ns_handler = ns_handler.lock()) {
+            auto android_ns_handler = std::static_pointer_cast<AndroidSubscribeNamespaceHandler>(shared_ns_handler);
+            jobject cb_ref = android_ns_handler->GetCallbackRef();
+            if (cb_ref) {
+                JNIEnv* env = nullptr;
+                bool detach = false;
+                if (g_jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_EDETACHED) {
+                    g_jvm->AttachCurrentThread(&env, nullptr);
+                    detach = true;
+                }
+
+                if (env) {
+                    jclass callbackClass = env->GetObjectClass(cb_ref);
+                    jmethodID methodId = env->GetMethodID(callbackClass, "onMatch", "(Ljava/lang/String;)Z");
+                    if (methodId) {
+                        jstring jtrack_name = env->NewStringUTF(track_name_str.c_str());
+                        env->CallBooleanMethod(cb_ref, methodId, jtrack_name);
+                        env->DeleteLocalRef(jtrack_name);
+                    }
+                    env->DeleteLocalRef(callbackClass);
+                }
+
+                if (detach) g_jvm->DetachCurrentThread();
+            }
+        }
 
         LOGI("Accepted PUBLISH for track: %s", track_name_str.c_str());
     }
@@ -583,16 +617,6 @@ Java_com_cisco_quadroid_transport_MoqNative_nativePublishNamespace(JNIEnv *env, 
     context->publish_ns_handler = AndroidPublishNamespaceHandler::Create(track_ns);
     context->client->PublishNamespace(context->publish_ns_handler);
 
-
-    // Wait for OK status
-    while (context->publish_ns_handler->GetStatus() != quicr::PublishNamespaceHandler::Status::kOk) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        if (context->publish_ns_handler->GetStatus() == quicr::PublishNamespaceHandler::Status::kError) {
-            LOGE("nativePublishNamespace: PublishNamespace failed with error: %d",
-                 static_cast<int>(context->publish_ns_handler->GetStatus()));
-            return;
-        }
-    }
     LOGI("nativePublishNamespace: Announced namespace %s", prefix.c_str());
 }
 
@@ -717,6 +741,8 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
 
     if (status != quicr::PublishTrackHandler::PublishObjectStatus::kOk) {
         LOGE("nativeSendObject: PublishObject failed with status %d", static_cast<int>(status));
+    } else {
+        LOGI("nativeSendObject: Sent object to track %s, with status kOK", name.c_str());
     }
 }
 
@@ -802,14 +828,23 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSubscribeNamespace(JNIEnv *env
     context->client->SubscribeNamespace(context->subscribe_ns_handler);
 
     // Wait for OK status
-    while (context->subscribe_ns_handler->GetStatus() != quicr::SubscribeNamespaceHandler::Status::kOk) {
+    int retries = 50; // 5 seconds
+    while (context->subscribe_ns_handler->GetStatus() != quicr::SubscribeNamespaceHandler::Status::kOk && retries-- > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        if (context->subscribe_ns_handler->GetStatus() == quicr::SubscribeNamespaceHandler::Status::kError) {
-            LOGE("nativePublishNamespace: SubscribeNameSpace failed with error: %d",
-                 static_cast<int>(context->subscribe_ns_handler->GetStatus()));
+        if (context->subscribe_ns_handler->GetStatus() ==
+            quicr::SubscribeNamespaceHandler::Status::kError) {
+            LOGE("nativeSubscribeNamespace: SubscribeNamespace failed with error status");
             return;
         }
     }
+
+    if (context->subscribe_ns_handler->GetStatus() == quicr::SubscribeNamespaceHandler::Status::kOk) {
+        LOGI("nativeSubscribeNamespace: Status is OK");
+    } else {
+        LOGE("nativeSubscribeNamespace: SubscribeNamespace failed to reach OK status");
+        return;
+    }
+
     LOGI("nativeSubscribeNamespace: Subscribed to namespace %s", prefix.c_str());
 }
 

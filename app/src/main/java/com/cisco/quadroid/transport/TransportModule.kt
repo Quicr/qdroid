@@ -4,6 +4,8 @@ import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.components.SingletonComponent
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentMap
 import javax.inject.Singleton
 
 @Module
@@ -12,7 +14,13 @@ object TransportModule {
 
     @Provides
     @Singleton
-    fun provideMoqTransport(): MoqTransport {
-        return MoqNative()
+    fun provideTrackCallbacks(): ConcurrentMap<String, MoqObjectCallback> {
+        return ConcurrentHashMap<String, MoqObjectCallback>()
+    }
+
+    @Provides
+    @Singleton
+    fun provideMoqTransport(trackCallbacks: ConcurrentMap<String, MoqObjectCallback>): MoqTransport {
+        return MoqNative(trackCallbacks)
     }
 }

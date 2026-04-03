@@ -39,7 +39,7 @@ class MoqMediaFramer(
             objectId = currentObjectId,
             payload = buffer,
             priority = 0,
-            deliveryTimeoutMs = 0,
+            deliveryTimeoutMs = 3000L,
             useDatagram = false // Default to stream for video frames
         )
 

@@ -1,6 +1,7 @@
 package com.cisco.quadroid.transport
 
 import android.util.Log
+import com.cisco.quadroid.util.TrackUtil
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -9,12 +10,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentMap
 
 /**
  * Native implementation of MoqTransport using libquicr via JNI.
  */
-class MoqNative : MoqTransport, MoqObjectCallback {
+class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCallback>) : MoqTransport, MoqObjectCallback {
     
     companion object {
         private const val TAG = "MoqNative"
@@ -28,9 +29,6 @@ class MoqNative : MoqTransport, MoqObjectCallback {
     override val connectionStatus: StateFlow<MoqConnectionStatus> = _connectionStatus.asStateFlow()
     private var connectionJob: Job? = null
     
-    // Map of track names to their specific callbacks for routing
-    private val trackCallbacks = ConcurrentHashMap<String, MoqObjectCallback>()
-
     override fun connect(url: String, deviceId: String) {
         connectionJob?.cancel()
         connectionJob = CoroutineScope(Dispatchers.IO).launch {
@@ -73,12 +71,14 @@ class MoqNative : MoqTransport, MoqObjectCallback {
     // Called by JNI for auto-subscribed tracks where MoqNative instance is the default callback
     @Suppress("unused") // Called from native code
     override fun onObject(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer) {
+        val trackKey = TrackUtil.generateTrackKeyFromFullName(trackName)
+
         // Route to specific callback if registered, otherwise log it
-        val callback = trackCallbacks[trackName]
+        val callback = trackCallbacks[trackKey]
         if (callback != null) {
             callback.onObject(trackName, groupId, objectId, payload)
         } else {
-            Log.d(TAG, "onObject: No callback registered for track=$trackName group=$groupId object=$objectId")
+            Log.d(TAG, "onObject: No callback registered for trackKey=$trackKey")
         }
     }
 

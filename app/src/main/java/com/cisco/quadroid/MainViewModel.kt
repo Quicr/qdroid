@@ -18,8 +18,8 @@ class MainViewModel @Inject constructor(
     private val videoSessionManager: VideoSessionManager
 ) : ViewModel() {
 
-    //Relay config - TODO - This should come in via catalog
-    var relay_url:String = "moq://eng-1.us-west-2.m10x.org:33440" //"moq://eng-3.us-west-2.m10x.org:33660"
+    //Relay config - TODO - This should come in via catalog or settings
+    var relay_url:String = "moq://eng-3.us-west-2.m10x.org:33440" //"moq://eng-3.us-west-2.m10x.org:33660-cloud flare relay"//"moq://eng-1.us-west-2.m10x.org:33440" //"moq://relay.us-west-2.m10x.org:33437" //"moq://eng-1.us-west-2.m10x.org:33440" //"moq://eng-3.us-west-2.m10x.org:33660"
     private var last_connected_url: String? = null
 
 
@@ -81,20 +81,16 @@ class MainViewModel @Inject constructor(
         videoSessionManager.enableAudio(newState)
     }
 
-    fun addParticipant() {
-        videoSessionManager.addParticipant()
-    }
-
     fun onLocalPreviewSurfaceReady(surface: android.view.Surface) {
         videoSessionManager.setLocalPreviewSurface(surface)
     }
 
-    fun onRemoteSurfaceReady(participantId: String, surface: android.view.Surface) {
-        videoSessionManager.onRemoteSurfaceReady(participantId, surface)
+    fun onRemoteSurfaceReady(trackKey: String, surface: android.view.Surface) {
+        videoSessionManager.onRemoteSurfaceReady(trackKey, surface)
     }
-    
-    fun onRemoteSurfaceDestroyed(participantId: String) {
-        videoSessionManager.onRemoteSurfaceDestroyed(participantId)
+
+    fun onRemoteSurfaceDestroyed(trackKey: String) {
+        videoSessionManager.onRemoteSurfaceDestroyed(trackKey)
     }
 
     fun endCall() {

@@ -2,6 +2,7 @@ package com.cisco.quadroid.transport
 
 import kotlinx.coroutines.flow.StateFlow
 import java.nio.ByteBuffer
+import java.util.concurrent.ConcurrentMap
 
 enum class MoqConnectionStatus {
     IDLE, CONNECTING, CONNECTED, DISCONNECTED, ERROR
@@ -11,6 +12,12 @@ enum class MoqConnectionStatus {
  * High-level interface for Media over QUIC (MoQ) transport.
  */
 interface MoqTransport {
+
+    /**
+     * Map of track names to their specific callbacks for routing.
+     * Implementations should provide a thread-safe map.
+     */
+    val trackCallbacks: ConcurrentMap<String, MoqObjectCallback>
 
     /**
      * Current connection status to the MoQ relay.
