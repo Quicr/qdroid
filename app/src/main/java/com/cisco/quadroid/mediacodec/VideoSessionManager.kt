@@ -7,10 +7,8 @@ import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
-import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.media.MediaRecorder
-import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
@@ -36,12 +34,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.nio.ByteBuffer
-import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.math.max
 import kotlin.math.min
 
 @Singleton
@@ -122,7 +119,6 @@ class VideoSessionManager @Inject constructor(
 
     private val otherVideoTrackName = "webex.com/meeting123/bob/video"
     private val otherAudioTrackName = "webex.com/meeting123/bob/audio"
-    private val otherNamespace = otherVideoTrackName.substringBeforeLast("/")
 
     val connectionStatus: StateFlow<MoqConnectionStatus> = moqTransport.connectionStatus
 
@@ -136,7 +132,6 @@ class VideoSessionManager @Inject constructor(
     }
 
     fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String) {
-        // Ensure any existing session is stopped
         stopSession()
 
         this.lifecycleOwner = lifecycleOwner
@@ -146,95 +141,93 @@ class VideoSessionManager @Inject constructor(
         cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
         _isFrontCamera.value = true
         
-        // Ensure connected if not already
         if (moqTransport.connectionStatus.value != MoqConnectionStatus.CONNECTED) {
             connectToRelay(relayUrl)
         }
 
-
         moqTransport.subscribeNamespace(namespace, object : NamespaceSubscriptionCallback {
             override fun onMatch(trackName: String): Boolean {
-                return if (trackName != otherVideoTrackName && trackName != otherAudioTrackName) {
-                    val trackKey = TrackUtil.generateTrackKeyFromFullName(trackName)
-                    moqTransport.trackCallbacks[trackKey] = object : MoqObjectCallback {
-                        override fun onObject(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer) {
-                            Log.d("VideoSessionManager", "onObject")
-                            if (trackName.contains("video")) {
-                                decoders[trackKey]?.let { decoder ->
-                                    try {
-                                        val index = decoder.dequeueInputBuffer(10000)
-                                        if (index >= 0) {
-                                            val inputBuffer = decoder.getInputBuffer(index)
-                                            inputBuffer?.clear()
-                                            inputBuffer?.put(payload)
-                                            val flags =
-                                                if (objectId == 0L) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
-                                            decoder.queueInputBuffer(
-                                                index,
-                                                0,
-                                                payload.remaining(),
-                                                0,
-                                                flags
-                                            )
-                                        }
-                                    } catch (e: Exception) {
-                                    }
-                                }
-                            } else if (trackName.contains("audio")) {
-                                audioDecoders[trackKey]?.let { decoder ->
-                                    try {
-                                        val index = decoder.dequeueInputBuffer(10000)
-                                        if (index >= 0) {
-                                            val inputBuffer = decoder.getInputBuffer(index)
-                                            inputBuffer?.clear()
-                                            inputBuffer?.put(payload)
-                                            decoder.queueInputBuffer(
-                                                index,
-                                                0,
-                                                payload.remaining(),
-                                                0,
-                                                0
-                                            )
-                                        }
-                                    } catch (e: Exception) {
-                                    }
-                                } ?: run {
-                                    Handler(audioEncoderThread.looper).post {
-                                        try {
-                                            audioFormatLatch.await()
-                                            setupAudioDecoder(trackKey)
-                                        } catch (e: Exception) {
+                if (trackName == otherAudioTrackName || trackName == otherVideoTrackName) return false
+                
+                Log.i(tag, "Namespace Match Found: $trackName")
+                val trackKey = TrackUtil.generateTrackKeyFromFullName(trackName)
+                
+                moqTransport.trackCallbacks[trackKey] = object : MoqObjectCallback {
+                    override fun onObject(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer) {
+                        if (trackName.contains("video")) {
+                            decoders[trackKey]?.let { decoder ->
+                                try {
+                                    val index = decoder.dequeueInputBuffer(0)
+                                    if (index >= 0) {
+                                        val inputBuffer = decoder.getInputBuffer(index)
+                                        if (inputBuffer != null) {
+                                            inputBuffer.clear()
+                                            val size = payload.remaining() // Capture size BEFORE put()
+                                            inputBuffer.put(payload)
+                                            val flags = if (objectId == 0L) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                                            decoder.queueInputBuffer(index, 0, size, 0, flags)
+                                            if (objectId % 100 == 0L) Log.d(tag, "Fed $size bytes to video decoder $trackKey")
                                         }
                                     }
+                                } catch (e: Exception) {
+                                    Log.e(tag, "Error feeding video decoder for $trackKey", e)
                                 }
                             }
+                            // Fallback discovery in case onMatch is slow or skipped
+                            addRemoteParticipant(trackKey)
+                        } else if (trackName.contains("audio")) {
+                            audioDecoders[trackKey]?.let { decoder ->
+                                try {
+                                    val index = decoder.dequeueInputBuffer(0)
+                                    if (index >= 0) {
+                                        val inputBuffer = decoder.getInputBuffer(index)
+                                        if (inputBuffer != null) {
+                                            inputBuffer.clear()
+                                            val size = payload.remaining()
+                                            inputBuffer.put(payload)
+                                            decoder.queueInputBuffer(index, 0, size, 0, 0)
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(tag, "Error feeding audio decoder for $trackKey", e)
+                                }
+                            } ?: run {
+                                audioEncoderHandler.post {
+                                    try {
+                                        if (audioFormatLatch.await(2, TimeUnit.SECONDS)) {
+                                            setupAudioDecoder(trackKey)
+                                        }
+                                    } catch (e: Exception) {}
+                                }
+                            }
+
                         }
                     }
-                    Log.d("VideoSessionManager", "onMatch: $trackName trackKey: $trackKey, adding to moqTransport.trackCallbacks: ${moqTransport.trackCallbacks.isNotEmpty()}")
-                    /*
-                    if (trackName.contains("video")) {
-                        addRemoteVideoParticipant(trackName)
-                    } else if (trackName.contains("audio")) {
-                        addRemoteAudioParticipant(trackName)
-                    }*/
-                    true
-                } else {
-                    false
                 }
+                
+                return true
             }
         })
-
-/*
-        moqTransport.publish(localVideoTrackName)
-        videoFramer = MoqMediaFramer(moqTransport, localVideoTrackName)
-        
-        moqTransport.publish(localAudioTrackName)
-        audioFramer = MoqAudioFramer(moqTransport, localAudioTrackName)*/
 
         setupEncoder()
         setupAudioEncoder()
         setupCamera(lifecycleOwner)
         startAudioCapture()
+    }
+
+    private fun addRemoteParticipant(trackKey: String) {
+        if (_remoteParticipants.value.any { it.id == trackKey }) {
+            return
+        }
+        
+        // Ensure state update happens on Main Thread for Compose visibility
+        Handler(context.mainLooper).post {
+            if (!_remoteParticipants.value.any { it.id == trackKey }) {
+                val stream = ParticipantStream(trackKey)
+                _remoteParticipants.value = _remoteParticipants.value + stream
+                Log.i(tag, "SUCCESS: Added remote participant to UI state: $trackKey. List size: ${_remoteParticipants.value.size}")
+            }
+        }
     }
 
     private fun setupCamera(owner: LifecycleOwner) {
@@ -253,7 +246,6 @@ class VideoSessionManager @Inject constructor(
         val provider = cameraProvider ?: return
         provider.unbindAll()
 
-        // Use ResolutionSelector to match the encoder's width and height
         val resolutionSelector = ResolutionSelector.Builder()
             .setResolutionStrategy(ResolutionStrategy(Size(width, height), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
             .build()
@@ -264,7 +256,6 @@ class VideoSessionManager @Inject constructor(
             .build().apply {
                 setSurfaceProvider { request ->
                     inputSurface?.let { 
-                        Log.d(tag, "Providing surface to encoder: $it, requested resolution: ${request.resolution}")
                         request.provideSurface(it, ContextCompat.getMainExecutor(context)) {} 
                     }
                 }
@@ -328,21 +319,18 @@ class VideoSessionManager @Inject constructor(
                                 }
                             }
                             releaseOutputBuffer(index, false)
-                        } catch (e: IllegalStateException) {
-                            // Expected during stop/release
-                        }
+                        } catch (e: IllegalStateException) {}
                     }
                     override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) { Log.e(tag, "Encoder Error", e) }
                     override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
-                        Log.d(tag, "Encoder output format changed: $format")
                         encoderOutputFormat = format
                         formatLatch.countDown()
+                        Log.i(tag, "Encoder format ready")
                     }
                 }, encoderHandler)
                 configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 this@VideoSessionManager.inputSurface = createInputSurface()
                 start()
-                Log.d(tag, "Video encoder started")
             }
         } catch (e: Exception) {
             Log.e(tag, "Failed to setup video encoder", e)
@@ -366,7 +354,6 @@ class VideoSessionManager @Inject constructor(
                     val encoder = audioEncoder ?: return
                     val info = MediaCodec.BufferInfo()
                     try {
-                        // Use a small timeout to avoid tight loop CPU usage
                         val index = encoder.dequeueOutputBuffer(info, 1000)
                         if (index >= 0) {
                             encoder.getOutputBuffer(index)?.let { buffer ->
@@ -380,11 +367,8 @@ class VideoSessionManager @Inject constructor(
                             audioFormatLatch.countDown()
                         }
                         audioEncoderHandler.post(this)
-                    } catch (e: IllegalStateException) {
-                        // Expected during stop/release
-                    } catch (e: Exception) {
-                        Log.e(tag, "Audio encoder output error", e)
-                    }
+                    } catch (e: IllegalStateException) {}
+                    catch (e: Exception) { Log.e(tag, "Audio encoder output error", e) }
                 }
             })
         } catch (e: Exception) {
@@ -418,159 +402,54 @@ class VideoSessionManager @Inject constructor(
     private fun feedAudioEncoder(buffer: ByteBuffer, size: Int) {
         val encoder = audioEncoder ?: return
         try {
-            val index = encoder.dequeueInputBuffer(10000)
+            val index = encoder.dequeueInputBuffer(0)
             if (index >= 0) {
                 val inputBuffer = encoder.getInputBuffer(index)
                 if (inputBuffer != null) {
                     inputBuffer.clear()
-                    
-                    // Prepare the source buffer to be read from the beginning up to the number of bytes read
                     buffer.position(0)
                     buffer.limit(size)
-                    
                     val toCopy = min(size, inputBuffer.remaining())
-                    if (toCopy < size) {
-                        //Log.w(tag, "Audio input buffer too small: $size > ${inputBuffer.remaining()}. Truncating.")
-                        buffer.limit(toCopy)
-                    }
-                    
                     inputBuffer.put(buffer)
                     encoder.queueInputBuffer(index, 0, toCopy, System.nanoTime() / 1000, 0)
                 }
             }
-        } catch (e: IllegalStateException) {
-            // Expected during stop/release
-        } catch (e: Exception) {
-            Log.e(tag, "Error feeding audio encoder", e)
-        }
-    }
-
-    private fun addRemoteVideoParticipant(trackName: String) {
-        val trackKey = TrackUtil.generateTrackKeyFromFullName(trackName)
-        if (_remoteParticipants.value.any { it.id == trackKey }) return
-
-        val stream = ParticipantStream(trackKey)
-        _remoteParticipants.value = _remoteParticipants.value + stream
-
-        //subscribeVideoToDecoder(trackName, trackKey)
-    }
-
-    private fun subscribeVideoToDecoder(trackName: String, trackKey: String) {
-        moqTransport.subscribe(trackName, object : MoqObjectCallback {
-            override fun onObject(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer) {
-                decoders[trackKey]?.let { decoder ->
-                    try {
-                        val index = decoder.dequeueInputBuffer(10000)
-                        if (index >= 0) {
-                            val inputBuffer = decoder.getInputBuffer(index)
-                            inputBuffer?.clear()
-                            inputBuffer?.put(payload)
-                            val flags = if (objectId == 0L) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
-                            decoder.queueInputBuffer(index, 0, payload.remaining(), 0, flags)
-                        }
-                    } catch (e: Exception) {}
-                }
-            }
-        })
-    }
-
-    private fun addRemoteAudioParticipant(trackName: String) {
-        val trackKey = TrackUtil.generateTrackKeyFromFullName(trackName)
-
-        moqTransport.subscribe(trackName, object : MoqObjectCallback {
-            override fun onObject(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer) {
-                audioDecoders[trackKey]?.let { decoder ->
-                    try {
-                        val index = decoder.dequeueInputBuffer(10000)
-                        if (index >= 0) {
-                            val inputBuffer = decoder.getInputBuffer(index)
-                            inputBuffer?.clear()
-                            inputBuffer?.put(payload)
-                            decoder.queueInputBuffer(index, 0, payload.remaining(), 0, 0)
-                        }
-                    } catch (e: Exception) {}
-                } ?: run {
-                    Handler(audioEncoderThread.looper).post {
-                        try {
-                            audioFormatLatch.await()
-                            setupAudioDecoder(trackKey)
-                        } catch (e: Exception) {}
-                    }
-                }
-            }
-        })
-    }
-
-    private fun setupAudioDecoder(id: String) {
-        val format = audioEncoderOutputFormat ?: return
-        val thread = HandlerThread("AudioDecoderThread_$id").apply { start() }
-        val handler = Handler(thread.looper)
-        audioDecoderThreads[id] = thread
-        audioDecoderHandlers[id] = handler
-
-        val decoder = MediaCodec.createDecoderByType(audioMimeType).apply {
-            configure(format, null, null, 0)
-            start()
-        }
-        audioDecoders[id] = decoder
-
-        val audioTrack = AudioTrack.Builder()
-            .setAudioAttributes(android.media.AudioAttributes.Builder()
-                .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build())
-            .setAudioFormat(AudioFormat.Builder()
-                .setEncoding(audioFormat)
-                .setSampleRate(sampleRate)
-                .setChannelMask(channelConfigOut)
-                .build())
-            .setBufferSizeInBytes(bufferSize)
-            .setTransferMode(AudioTrack.MODE_STREAM)
-            .build()
-        audioTrack.play()
-        audioTracks[id] = audioTrack
-        
-        handler.post(object : Runnable {
-            override fun run() {
-                if (audioDecoders.containsKey(id)) {
-                    val bufferInfo = MediaCodec.BufferInfo()
-                    try {
-                        val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 0)
-                        if (outIndex >= 0) {
-                            decoder.getOutputBuffer(outIndex)?.let { buffer ->
-                                audioTrack.write(buffer, bufferInfo.size, AudioTrack.WRITE_BLOCKING)
-                            }
-                            decoder.releaseOutputBuffer(outIndex, false)
-                        }
-                        handler.post(this)
-                    } catch (e: Exception) { }
-                }
-            }
-        })
+        } catch (e: Exception) {}
     }
 
     fun onRemoteSurfaceReady(trackKey: String, surface: Surface) {
+        Log.i(tag, "onRemoteSurfaceReady for trackKey: $trackKey")
         decoders[trackKey]?.setOutputSurface(surface) ?: run {
-            val thread = HandlerThread("SetupDecoderThread_$trackKey").apply { start() }
-            Handler(thread.looper).post {
+            val thread = HandlerThread("DecoderThread_$trackKey").apply { start() }
+            val handler = Handler(thread.looper)
+            decoderThreads[trackKey] = thread
+            decoderHandlers[trackKey] = handler
+
+            handler.post {
                 try {
-                    formatLatch.await()
-                    setupDecoder(trackKey, surface)
+                    Log.d(tag, "Waiting for formatLatch for $trackKey...")
+                    if (formatLatch.await(5, TimeUnit.SECONDS)) {
+                        setupDecoder(trackKey, surface)
+                    } else {
+                        Log.e(tag, "Timeout waiting for encoder format! Using default.")
+                        setupDecoder(trackKey, surface)
+                    }
                 } catch (e: InterruptedException) {
                     Thread.currentThread().interrupt()
                 }
             }
         }
     }
-
+    
     fun onRemoteSurfaceDestroyed(trackKey: String) {
+        Log.i(tag, "onRemoteSurfaceDestroyed for trackKey: $trackKey")
         synchronized(this) {
             decoderHandlers.remove(trackKey)?.removeCallbacksAndMessages(null)
             decoders.remove(trackKey)?.apply {
                 try { stop(); release() } catch (e: Exception) { }
             }
             decoderThreads.remove(trackKey)?.quitSafely()
-
+            
             audioDecoderHandlers.remove(trackKey)?.removeCallbacksAndMessages(null)
             audioDecoders.remove(trackKey)?.apply {
                 try { stop(); release() } catch (e: Exception) { }
@@ -583,32 +462,96 @@ class VideoSessionManager @Inject constructor(
     }
 
     private fun setupDecoder(id: String, surface: Surface) {
-        val format = encoderOutputFormat ?: return
-        val thread = HandlerThread("DecoderThread_$id").apply { start() }
-        val handler = Handler(thread.looper)
-        decoderThreads[id] = thread
-        decoderHandlers[id] = handler
-
-        val decoder = MediaCodec.createDecoderByType(videoMimeType).apply {
-            configure(format, surface, null, 0)
-            start()
-        }
-        decoders[id] = decoder
+        Log.i(tag, "Setting up video decoder for $id")
         
-        handler.post(object : Runnable {
-            override fun run() {
-                if (decoders.containsKey(id)) {
-                    val bufferInfo = MediaCodec.BufferInfo()
-                    try {
-                        val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 0)
-                        if (outIndex >= 0) {
-                            decoder.releaseOutputBuffer(outIndex, true)
-                        }
-                        handler.post(this)
-                    } catch (e: Exception) { }
+        // When decoding to a surface, we should NOT use the encoder's input format directly
+        // because it contains COLOR_FormatSurface which is for ENCODER input only.
+        val format = encoderOutputFormat?.let {
+            val newFormat = MediaFormat.createVideoFormat(videoMimeType, width, height)
+            if (it.containsKey("csd-0")) newFormat.setByteBuffer("csd-0", it.getByteBuffer("csd-0"))
+            if (it.containsKey("csd-1")) newFormat.setByteBuffer("csd-1", it.getByteBuffer("csd-1"))
+            newFormat
+        } ?: MediaFormat.createVideoFormat(videoMimeType, width, height)
+        
+        val handler = decoderHandlers[id] ?: return
+
+        try {
+            val decoder = MediaCodec.createDecoderByType(videoMimeType)
+            decoder.configure(format, surface, null, 0)
+            decoder.start()
+            decoders[id] = decoder
+            
+            handler.post(object : Runnable {
+                override fun run() {
+                    if (decoders.containsKey(id)) {
+                        val bufferInfo = MediaCodec.BufferInfo()
+                        try {
+                            val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 10000)
+                            if (outIndex >= 0) {
+                                // Render true makes it go to the surface
+                                decoder.releaseOutputBuffer(outIndex, true)
+                            }
+                            handler.post(this)
+                        } catch (e: Exception) { }
+                    }
                 }
+            })
+            Log.i(tag, "Decoder for $id started successfully")
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to setup video decoder for $id", e)
+        }
+    }
+
+    private fun setupAudioDecoder(id: String) {
+        val format = audioEncoderOutputFormat ?: return
+        val thread = HandlerThread("AudioDecoderThread_$id").apply { start() }
+        val handler = Handler(thread.looper)
+        audioDecoderThreads[id] = thread
+        audioDecoderHandlers[id] = handler
+
+        try {
+            val decoder = MediaCodec.createDecoderByType(audioMimeType).apply {
+                configure(format, null, null, 0)
+                start()
             }
-        })
+            audioDecoders[id] = decoder
+
+            val audioTrack = AudioTrack.Builder()
+                .setAudioAttributes(android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build())
+                .setAudioFormat(AudioFormat.Builder()
+                    .setEncoding(audioFormat)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(channelConfigOut)
+                    .build())
+                .setBufferSizeInBytes(bufferSize)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+            audioTrack.play()
+            audioTracks[id] = audioTrack
+            
+            handler.post(object : Runnable {
+                override fun run() {
+                    if (audioDecoders.containsKey(id)) {
+                        val bufferInfo = MediaCodec.BufferInfo()
+                        try {
+                            val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 0)
+                            if (outIndex >= 0) {
+                                decoder.getOutputBuffer(outIndex)?.let { buffer ->
+                                    audioTrack.write(buffer, bufferInfo.size, AudioTrack.WRITE_BLOCKING)
+                                }
+                                decoder.releaseOutputBuffer(outIndex, false)
+                            }
+                            handler.post(this)
+                        } catch (e: Exception) { }
+                    }
+                }
+            })
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to setup audio decoder for $id", e)
+        }
     }
 
     fun enableVideo(enabled: Boolean, owner: LifecycleOwner) {
@@ -665,7 +608,6 @@ class VideoSessionManager @Inject constructor(
         encoderOutputFormat = null
         audioEncoderOutputFormat = null
         
-        // Release any waiting threads before resetting latches
         formatLatch.countDown()
         audioFormatLatch.countDown()
 

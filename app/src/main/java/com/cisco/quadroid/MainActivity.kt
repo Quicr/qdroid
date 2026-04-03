@@ -2,6 +2,7 @@ package com.cisco.quadroid
 
 import android.Manifest
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -669,6 +670,7 @@ fun AdaptiveNativeGrid(
     isLandscape: Boolean,
     aspectRatio: Float
 ) {
+    Log.d("AdaptiveNativeGrid", "Rendering grid with ${participants.size} participants")
     if (isLandscape) {
         Row(modifier = Modifier.fillMaxSize()) {
             participants.forEach { participant ->
@@ -689,13 +691,15 @@ fun AdaptiveNativeGrid(
         Column(modifier = Modifier.fillMaxSize()) {
             when (participants.size) {
                 1 -> {
-                    NativeVideoRenderer(
-                        onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
-                        onSurfaceDestroyed = { onSurfaceDestroyed(participants[0].id) },
-                        modifier = Modifier.fillMaxSize(),
-                        mirrorHorizontal = true,
-                        aspectRatio = aspectRatio
-                    )
+                    key(participants[0].id) {
+                        NativeVideoRenderer(
+                            onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
+                            onSurfaceDestroyed = { onSurfaceDestroyed(participants[0].id) },
+                            modifier = Modifier.fillMaxSize(),
+                            mirrorHorizontal = true,
+                            aspectRatio = aspectRatio
+                        )
+                    }
                 }
                 2 -> {
                     participants.forEach { participant ->
@@ -714,32 +718,38 @@ fun AdaptiveNativeGrid(
                 }
                 else -> {
                     Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        NativeVideoRenderer(
-                            onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
-                            onSurfaceDestroyed = { onSurfaceDestroyed(participants[0].id) },
-                            modifier = Modifier.fillMaxSize(),
-                            mirrorHorizontal = true,
-                            aspectRatio = aspectRatio
-                        )
-                    }
-                    Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                        key(participants[0].id) {
                             NativeVideoRenderer(
-                                onSurfaceCreated = { onSurfaceReady(participants[1].id, it) },
-                                onSurfaceDestroyed = { onSurfaceDestroyed(participants[1].id) },
-                                modifier = Modifier.fillMaxSize(),
-                                mirrorHorizontal = true,
-                                aspectRatio = aspectRatio
-                              )
-                        }
-                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
-                            NativeVideoRenderer(
-                                onSurfaceCreated = { onSurfaceReady(participants[2].id, it) },
-                                onSurfaceDestroyed = { onSurfaceDestroyed(participants[2].id) },
+                                onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
+                                onSurfaceDestroyed = { onSurfaceDestroyed(participants[0].id) },
                                 modifier = Modifier.fillMaxSize(),
                                 mirrorHorizontal = true,
                                 aspectRatio = aspectRatio
                             )
+                        }
+                    }
+                    Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                            key(participants[1].id) {
+                                NativeVideoRenderer(
+                                    onSurfaceCreated = { onSurfaceReady(participants[1].id, it) },
+                                    onSurfaceDestroyed = { onSurfaceDestroyed(participants[1].id) },
+                                    modifier = Modifier.fillMaxSize(),
+                                    mirrorHorizontal = true,
+                                    aspectRatio = aspectRatio
+                                )
+                            }
+                        }
+                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                            key(participants[2].id) {
+                                NativeVideoRenderer(
+                                    onSurfaceCreated = { onSurfaceReady(participants[2].id, it) },
+                                    onSurfaceDestroyed = { onSurfaceDestroyed(participants[2].id) },
+                                    modifier = Modifier.fillMaxSize(),
+                                    mirrorHorizontal = true,
+                                    aspectRatio = aspectRatio
+                                )
+                            }
                         }
                     }
                 }

@@ -28,16 +28,14 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
     private val _connectionStatus = MutableStateFlow(MoqConnectionStatus.IDLE)
     override val connectionStatus: StateFlow<MoqConnectionStatus> = _connectionStatus.asStateFlow()
     private var connectionJob: Job? = null
+
+    override var discoveryListener: MoqDiscoveryListener? = null
     
     override fun connect(url: String, deviceId: String) {
         connectionJob?.cancel()
         connectionJob = CoroutineScope(Dispatchers.IO).launch {
             _connectionStatus.value = MoqConnectionStatus.CONNECTING
             try {
-                // Call native connect which will:
-                // 1. Create AndroidMoqClient
-                // 2. Call Connect() on libquicr client
-                // 3. Status updates will come via onConnectionStatusChanged callback
                 val ptr = nativeConnect(url, deviceId)
                 if (ptr == 0L) {
                     Log.e(TAG, "Native connect failed to initialize")
@@ -45,7 +43,6 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
                 } else {
                     nativePtr = ptr
                     Log.i(TAG, "Native client initialized, connection in progress")
-                    // Status will be updated via onConnectionStatusChanged callback
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Exception during connect: ${e.message}")
@@ -54,7 +51,6 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
         }
     }
 
-    // Called by JNI when connection status changes
     @Suppress("unused") // Called from native code
     private fun onConnectionStatusChanged(status: Int) {
         Log.i(TAG, "Connection status changed to: $status")
@@ -68,17 +64,16 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
         }
     }
 
-    // Called by JNI for auto-subscribed tracks where MoqNative instance is the default callback
     @Suppress("unused") // Called from native code
     override fun onObject(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer) {
         val trackKey = TrackUtil.generateTrackKeyFromFullName(trackName)
 
-        // Route to specific callback if registered, otherwise log it
         val callback = trackCallbacks[trackKey]
         if (callback != null) {
             callback.onObject(trackName, groupId, objectId, payload)
         } else {
-            Log.d(TAG, "onObject: No callback registered for trackKey=$trackKey")
+            // WebRTC-style media discovery: notify listener that an unknown track is sending media
+            discoveryListener?.onTrackDiscovered(trackName, groupId, objectId, payload)
         }
     }
 
@@ -127,7 +122,7 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
     }
 
     override fun subscribe(trackName: String, callback: MoqObjectCallback) {
-        trackCallbacks[trackName] = callback
+        trackCallbacks[trackKey(trackName)] = callback
         if (nativePtr != 0L) nativeSubscribe(nativePtr, trackName, callback)
     }
 
@@ -139,7 +134,8 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
         if (nativePtr != 0L) nativeSetNamespaceDefaultBehavior(nativePtr, acceptAll)
     }
 
-    // Native methods
+    private fun trackKey(fullName: String): String = TrackUtil.generateTrackKeyFromFullName(fullName)
+
     private external fun nativeConnect(url: String, deviceId: String): Long
     private external fun nativeDisconnect(ptr: Long)
     private external fun nativePublishNamespace(ptr: Long, namespacePrefix: String)

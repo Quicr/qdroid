@@ -20,6 +20,11 @@ interface MoqTransport {
     val trackCallbacks: ConcurrentMap<String, MoqObjectCallback>
 
     /**
+     * Optional listener for tracks that receive data but have no registered callback.
+     */
+    var discoveryListener: MoqDiscoveryListener?
+
+    /**
      * Current connection status to the MoQ relay.
      */
     val connectionStatus: StateFlow<MoqConnectionStatus>
@@ -106,4 +111,11 @@ interface NamespaceSubscriptionCallback {
      * @return true to accept and subscribe to the track, false to reject.
      */
     fun onMatch(trackName: String): Boolean
+}
+
+interface MoqDiscoveryListener {
+    /**
+     * Called when data is received for a track that has no specific callback registered.
+     */
+    fun onTrackDiscovered(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer)
 }
