@@ -586,6 +586,44 @@ fun InCallScreen(
                 )
             }
         }
+        // 2. Local PIP
+        if (remoteParticipants.isNotEmpty()) {
+            AnimatedVisibility(
+                visible = showControls,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(16.dp)
+                    .zIndex(1f),
+                enter = fadeIn(),
+                exit = fadeOut()
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(if (isLandscape) 140.dp else 100.dp, if (isLandscape) 90.dp else 150.dp)
+                        .clip(RoundedCornerShape(16.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+                        .background(Color.Black.copy(alpha = 0.2f))
+                ) {
+                    if (isVideoEnabled) {
+                        key(videoToggleCount) {
+                            NativeVideoRenderer(
+                                onSurfaceCreated = onLocalPreviewSurfaceReady,
+                                onSurfaceDestroyed = { },
+                                modifier = Modifier.fillMaxSize(),
+                                zOrderMediaOverlay = true,
+                                mirrorHorizontal = true,
+                                aspectRatio = videoAspectRatio
+                            )
+                        }
+                    } else {
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.VideocamOff, contentDescription = null, tint = Color.White.copy(alpha = 0.5f))
+                        }
+                    }
+                }
+            }
+        }
 
         // 6. Connection Status (Top Right Glass Icon)
         ConnectionStatusIcon(

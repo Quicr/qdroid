@@ -115,11 +115,13 @@ class VideoSessionManager @Inject constructor(
     private var videoFramer: MoqMediaFramer? = null
     private val localVideoTrackName = "webex.com/meeting123/alice/video"
     private val localAudioTrackName = "webex.com/meeting123/alice/audio"
-    private val namespace: String = localVideoTrackName.substringBeforeLast("/")
+    
+    // meeting prefix for discovery
+    private val namespace = localVideoTrackName.substringBeforeLast("/")
 
     private val otherVideoTrackName = "webex.com/meeting123/bob/video"
     private val otherAudioTrackName = "webex.com/meeting123/bob/audio"
-
+    private val otherNamespace = otherVideoTrackName.substringBeforeLast("/")
     val connectionStatus: StateFlow<MoqConnectionStatus> = moqTransport.connectionStatus
 
     fun connectToRelay(url: String) {
@@ -145,9 +147,10 @@ class VideoSessionManager @Inject constructor(
             connectToRelay(relayUrl)
         }
 
-        moqTransport.subscribeNamespace(namespace, object : NamespaceSubscriptionCallback {
+        // Subscribe to meeting namespace to discover all participants
+        moqTransport.subscribeNamespace(otherNamespace, object : NamespaceSubscriptionCallback {
             override fun onMatch(trackName: String): Boolean {
-                if (trackName == otherAudioTrackName || trackName == otherVideoTrackName) return false
+                if (trackName == localVideoTrackName || trackName == localAudioTrackName) return false
                 
                 Log.i(tag, "Namespace Match Found: $trackName")
                 val trackKey = TrackUtil.generateTrackKeyFromFullName(trackName)
@@ -157,16 +160,15 @@ class VideoSessionManager @Inject constructor(
                         if (trackName.contains("video")) {
                             decoders[trackKey]?.let { decoder ->
                                 try {
-                                    val index = decoder.dequeueInputBuffer(0)
+                                    val index = decoder.dequeueInputBuffer(10000)
                                     if (index >= 0) {
                                         val inputBuffer = decoder.getInputBuffer(index)
                                         if (inputBuffer != null) {
                                             inputBuffer.clear()
-                                            val size = payload.remaining() // Capture size BEFORE put()
+                                            val size = payload.remaining()
                                             inputBuffer.put(payload)
                                             val flags = if (objectId == 0L) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
                                             decoder.queueInputBuffer(index, 0, size, 0, flags)
-                                            if (objectId % 100 == 0L) Log.d(tag, "Fed $size bytes to video decoder $trackKey")
                                         }
                                     }
                                 } catch (e: Exception) {
@@ -178,7 +180,7 @@ class VideoSessionManager @Inject constructor(
                         } else if (trackName.contains("audio")) {
                             audioDecoders[trackKey]?.let { decoder ->
                                 try {
-                                    val index = decoder.dequeueInputBuffer(0)
+                                    val index = decoder.dequeueInputBuffer(10000)
                                     if (index >= 0) {
                                         val inputBuffer = decoder.getInputBuffer(index)
                                         if (inputBuffer != null) {
@@ -192,15 +194,12 @@ class VideoSessionManager @Inject constructor(
                                     Log.e(tag, "Error feeding audio decoder for $trackKey", e)
                                 }
                             } ?: run {
-                                audioEncoderHandler.post {
-                                    try {
-                                        if (audioFormatLatch.await(2, TimeUnit.SECONDS)) {
-                                            setupAudioDecoder(trackKey)
-                                        }
-                                    } catch (e: Exception) {}
+                                if (!audioDecoderHandlers.containsKey(trackKey)) {
+                                    audioEncoderHandler.post {
+                                        setupAudioDecoder(trackKey)
+                                    }
                                 }
                             }
-
                         }
                     }
                 }
@@ -208,6 +207,12 @@ class VideoSessionManager @Inject constructor(
                 return true
             }
         })
+
+        moqTransport.publish(localVideoTrackName)
+        videoFramer = MoqMediaFramer(moqTransport, localVideoTrackName)
+
+        moqTransport.publish(localAudioTrackName)
+        audioFramer = MoqAudioFramer(moqTransport, localAudioTrackName)
 
         setupEncoder()
         setupAudioEncoder()
@@ -220,7 +225,6 @@ class VideoSessionManager @Inject constructor(
             return
         }
         
-        // Ensure state update happens on Main Thread for Compose visibility
         Handler(context.mainLooper).post {
             if (!_remoteParticipants.value.any { it.id == trackKey }) {
                 val stream = ParticipantStream(trackKey)
@@ -325,7 +329,6 @@ class VideoSessionManager @Inject constructor(
                     override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
                         encoderOutputFormat = format
                         formatLatch.countDown()
-                        Log.i(tag, "Encoder format ready")
                     }
                 }, encoderHandler)
                 configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -402,7 +405,7 @@ class VideoSessionManager @Inject constructor(
     private fun feedAudioEncoder(buffer: ByteBuffer, size: Int) {
         val encoder = audioEncoder ?: return
         try {
-            val index = encoder.dequeueInputBuffer(0)
+            val index = encoder.dequeueInputBuffer(10000)
             if (index >= 0) {
                 val inputBuffer = encoder.getInputBuffer(index)
                 if (inputBuffer != null) {
@@ -418,7 +421,6 @@ class VideoSessionManager @Inject constructor(
     }
 
     fun onRemoteSurfaceReady(trackKey: String, surface: Surface) {
-        Log.i(tag, "onRemoteSurfaceReady for trackKey: $trackKey")
         decoders[trackKey]?.setOutputSurface(surface) ?: run {
             val thread = HandlerThread("DecoderThread_$trackKey").apply { start() }
             val handler = Handler(thread.looper)
@@ -427,11 +429,9 @@ class VideoSessionManager @Inject constructor(
 
             handler.post {
                 try {
-                    Log.d(tag, "Waiting for formatLatch for $trackKey...")
                     if (formatLatch.await(5, TimeUnit.SECONDS)) {
                         setupDecoder(trackKey, surface)
                     } else {
-                        Log.e(tag, "Timeout waiting for encoder format! Using default.")
                         setupDecoder(trackKey, surface)
                     }
                 } catch (e: InterruptedException) {
@@ -442,7 +442,6 @@ class VideoSessionManager @Inject constructor(
     }
     
     fun onRemoteSurfaceDestroyed(trackKey: String) {
-        Log.i(tag, "onRemoteSurfaceDestroyed for trackKey: $trackKey")
         synchronized(this) {
             decoderHandlers.remove(trackKey)?.removeCallbacksAndMessages(null)
             decoders.remove(trackKey)?.apply {
@@ -462,10 +461,6 @@ class VideoSessionManager @Inject constructor(
     }
 
     private fun setupDecoder(id: String, surface: Surface) {
-        Log.i(tag, "Setting up video decoder for $id")
-        
-        // When decoding to a surface, we should NOT use the encoder's input format directly
-        // because it contains COLOR_FormatSurface which is for ENCODER input only.
         val format = encoderOutputFormat?.let {
             val newFormat = MediaFormat.createVideoFormat(videoMimeType, width, height)
             if (it.containsKey("csd-0")) newFormat.setByteBuffer("csd-0", it.getByteBuffer("csd-0"))
@@ -488,7 +483,6 @@ class VideoSessionManager @Inject constructor(
                         try {
                             val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 10000)
                             if (outIndex >= 0) {
-                                // Render true makes it go to the surface
                                 decoder.releaseOutputBuffer(outIndex, true)
                             }
                             handler.post(this)
@@ -496,14 +490,19 @@ class VideoSessionManager @Inject constructor(
                     }
                 }
             })
-            Log.i(tag, "Decoder for $id started successfully")
         } catch (e: Exception) {
             Log.e(tag, "Failed to setup video decoder for $id", e)
         }
     }
 
     private fun setupAudioDecoder(id: String) {
-        val format = audioEncoderOutputFormat ?: return
+        Log.i(tag, "Setting up audio decoder for $id")
+        
+        val format = audioEncoderOutputFormat ?: MediaFormat.createAudioFormat(audioMimeType, sampleRate, 1).apply {
+            setInteger(MediaFormat.KEY_BIT_RATE, audioBitRate)
+            setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+        }
+
         val thread = HandlerThread("AudioDecoderThread_$id").apply { start() }
         val handler = Handler(thread.looper)
         audioDecoderThreads[id] = thread
@@ -537,7 +536,7 @@ class VideoSessionManager @Inject constructor(
                     if (audioDecoders.containsKey(id)) {
                         val bufferInfo = MediaCodec.BufferInfo()
                         try {
-                            val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 0)
+                            val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 10000)
                             if (outIndex >= 0) {
                                 decoder.getOutputBuffer(outIndex)?.let { buffer ->
                                     audioTrack.write(buffer, bufferInfo.size, AudioTrack.WRITE_BLOCKING)

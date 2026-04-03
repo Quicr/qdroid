@@ -48,9 +48,14 @@ fun NativeVideoRenderer(
             }
         },
         update = { view ->
-            aspectRatio?.let {
-                // Assuming width=1280, height=720 for the video source
-                // VideoSessionManager config: width=1280, height=720
+            // Use the provided aspectRatio if available, otherwise default to portrait 9:16
+            val ratio = aspectRatio ?: (720f / 1280f)
+            
+            // AspectSafeSurfaceView.setAspectRatio expects (width, height)
+            // If ratio < 1, it's portrait. If ratio > 1, it's landscape.
+            if (ratio < 1f) {
+                view.setAspectRatio(720, 1280)
+            } else {
                 view.setAspectRatio(1280, 720)
             }
         },
