@@ -9,6 +9,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.graphics.graphicsLayer
+import android.view.ViewOutlineProvider
+import android.graphics.Outline
 
 @Composable
 fun NativeVideoRenderer(
@@ -28,8 +30,17 @@ fun NativeVideoRenderer(
             Log.d("NativeVideoRenderer", "Creating AspectSafeSurfaceView")
             AspectSafeSurfaceView(context).apply {
                 if (zOrderMediaOverlay) {
-                    setZOrderOnTop(true)
+                    setZOrderMediaOverlay(true)
                 }
+
+                // Enable rounded corner clipping for SurfaceView
+                clipToOutline = true
+                outlineProvider = object : ViewOutlineProvider() {
+                    override fun getOutline(view: android.view.View, outline: Outline) {
+                        outline.setRoundRect(0, 0, view.width, view.height, 48f) // Rounded corners for PIP
+                    }
+                }
+
                 holder.addCallback(object : SurfaceHolder.Callback {
                     override fun surfaceCreated(holder: SurfaceHolder) {
                         Log.d("NativeVideoRenderer", "Surface Created: ${holder.surface}")
@@ -51,13 +62,13 @@ fun NativeVideoRenderer(
             // Use the provided aspectRatio if available, otherwise default to portrait 9:16
             val ratio = aspectRatio ?: (720f / 1280f)
             
-            // AspectSafeSurfaceView.setAspectRatio expects (width, height)
-            // If ratio < 1, it's portrait. If ratio > 1, it's landscape.
             if (ratio < 1f) {
                 view.setAspectRatio(720, 1280)
             } else {
                 view.setAspectRatio(1280, 720)
             }
+            // Ensure outline is recalculated if size changes
+            view.invalidateOutline()
         },
         modifier = modifier.graphicsLayer(scaleX = if (mirrorHorizontal) -1f else 1f)
     )

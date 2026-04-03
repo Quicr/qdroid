@@ -72,6 +72,7 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
         if (callback != null) {
             callback.onObject(trackName, groupId, objectId, payload)
         } else {
+            Log.w(TAG, "No callback registered for trackKey=$trackKey (trackName=$trackName). Available keys: ${trackCallbacks.keys}")
             // WebRTC-style media discovery: notify listener that an unknown track is sending media
             discoveryListener?.onTrackDiscovered(trackName, groupId, objectId, payload)
         }

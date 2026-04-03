@@ -19,7 +19,7 @@ class MainViewModel @Inject constructor(
 ) : ViewModel() {
 
     //Relay config - TODO - This should come in via catalog or settings
-    var relay_url:String = "moq://eng-3.us-west-2.m10x.org:33440" //"moq://eng-3.us-west-2.m10x.org:33660-cloud flare relay"//"moq://eng-1.us-west-2.m10x.org:33440" //"moq://relay.us-west-2.m10x.org:33437" //"moq://eng-1.us-west-2.m10x.org:33440" //"moq://eng-3.us-west-2.m10x.org:33660"
+    var relay_url:String = "moq://eng-3.us-west-2.m10x.org:33550" //"moq://eng-3.us-west-2.m10x.org:33660-cloud flare relay"//"moq://eng-1.us-west-2.m10x.org:33440" //"moq://relay.us-west-2.m10x.org:33437" //"moq://eng-1.us-west-2.m10x.org:33440" //"moq://eng-3.us-west-2.m10x.org:33660"
     private var last_connected_url: String? = null
 
 

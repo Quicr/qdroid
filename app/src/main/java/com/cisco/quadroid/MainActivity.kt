@@ -241,7 +241,7 @@ fun MainScreen(viewModel: MainViewModel) {
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 100.dp)
-                    .zIndex(10f)
+                    .zIndex(20f)
             ) {
                 toastMessage?.let { msg ->
                     GlassToast(message = msg)
@@ -558,7 +558,7 @@ fun InCallScreen(
                 showControls = !showControls
             }
     ) {
-        // Video Participants
+        // Video Participants Grid (Layer 0)
         Box(modifier = Modifier.fillMaxSize()) {
             if (remoteParticipants.isEmpty()) {
                 if (isVideoEnabled) {
@@ -586,7 +586,8 @@ fun InCallScreen(
                 )
             }
         }
-        // 2. Local PIP
+
+        // 2. Local PIP (Layer 1) - Higher zIndex and Rounded Clipping
         if (remoteParticipants.isNotEmpty()) {
             AnimatedVisibility(
                 visible = showControls,
@@ -594,15 +595,15 @@ fun InCallScreen(
                     .align(Alignment.TopEnd)
                     .statusBarsPadding()
                     .padding(16.dp)
-                    .zIndex(1f),
+                    .zIndex(5f),
                 enter = fadeIn(),
                 exit = fadeOut()
             ) {
                 Box(
                     modifier = Modifier
-                        .size(if (isLandscape) 140.dp else 100.dp, if (isLandscape) 90.dp else 150.dp)
-                        .clip(RoundedCornerShape(16.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
+                        .size(if (isLandscape) 160.dp else 120.dp, if (isLandscape) 90.dp else 180.dp)
+                        .clip(RoundedCornerShape(24.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(24.dp))
                         .background(Color.Black.copy(alpha = 0.2f))
                 ) {
                     if (isVideoEnabled) {
@@ -625,14 +626,14 @@ fun InCallScreen(
             }
         }
 
-        // 6. Connection Status (Top Right Glass Icon)
+        // 6. Connection Status (Layer 2) - Topmost Z-Index
         ConnectionStatusIcon(
             status = connectionStatus,
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .statusBarsPadding()
                 .padding(16.dp)
-                .zIndex(3f)
+                .zIndex(10f)
         )
 
         // Floating Control Bar
