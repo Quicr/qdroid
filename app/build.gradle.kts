@@ -91,6 +91,8 @@ dependencies {
     // Concurrency
     implementation(libs.androidx.concurrent.futures.ktx)
 
+    // native submodule
+    implementation(project(":nativeaudio"))
 
     // Testing
     testImplementation(libs.junit)

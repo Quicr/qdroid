@@ -11,6 +11,8 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.graphics.graphicsLayer
 import android.view.ViewOutlineProvider
 import android.graphics.Outline
+import androidx.camera.viewfinder.core.impl.Transformations
+import androidx.compose.ui.platform.LocalView
 
 @Composable
 fun NativeVideoRenderer(

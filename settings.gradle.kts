@@ -22,3 +22,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Quadroid"
 include(":app")
+include(":nativeaudio")
