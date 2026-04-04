@@ -107,6 +107,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.cisco.quadroid.mediacodec.ParticipantStream
 import com.cisco.quadroid.transport.MoqConnectionStatus
 import com.cisco.quadroid.ui.components.NativeVideoRenderer
+import com.cisco.quadroid.ui.components.PreviewNativeVideoRenderer
 import com.cisco.quadroid.ui.theme.QuadroidTheme
 import com.cisco.quadroid.util.DeviceIdentifier
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
@@ -180,6 +181,17 @@ fun MainScreen(viewModel: MainViewModel) {
         )
     )
 
+    // Flag to track if we should start the call once permissions are granted
+    var startCallRequested by remember { mutableStateOf(false) }
+
+    LaunchedEffect(permissionsState.allPermissionsGranted) {
+        if (permissionsState.allPermissionsGranted && startCallRequested) {
+            startCallRequested = false
+            val rotation = context.display?.rotation ?: 0
+            viewModel.startCall(lifecycleOwner, rotation)
+        }
+    }
+
     var toastMessage by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(connectionStatus) {
@@ -202,6 +214,7 @@ fun MainScreen(viewModel: MainViewModel) {
                                 val rotation = context.display?.rotation ?: 0
                                 viewModel.startCall(lifecycleOwner, rotation)
                             } else {
+                                startCallRequested = true
                                 permissionsState.launchMultiplePermissionRequest()
                             }
                         },
@@ -565,7 +578,7 @@ fun InCallScreen(
             if (remoteParticipants.isEmpty()) {
                 if (isVideoEnabled) {
                     key(videoToggleCount) {
-                        NativeVideoRenderer(
+                        PreviewNativeVideoRenderer(
                             onSurfaceCreated = onLocalPreviewSurfaceReady,
                             onSurfaceDestroyed = { },
                             modifier = Modifier.fillMaxSize(),
@@ -610,11 +623,10 @@ fun InCallScreen(
                 ) {
                     if (isVideoEnabled) {
                         key(videoToggleCount) {
-                            NativeVideoRenderer(
+                            PreviewNativeVideoRenderer(
                                 onSurfaceCreated = onLocalPreviewSurfaceReady,
                                 onSurfaceDestroyed = { },
                                 modifier = Modifier.fillMaxSize(),
-                                zOrderMediaOverlay = true,
                                 mirrorHorizontal = true,
                                 aspectRatio = videoAspectRatio
                             )

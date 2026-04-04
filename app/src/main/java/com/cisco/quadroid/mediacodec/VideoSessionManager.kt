@@ -86,13 +86,19 @@ class VideoSessionManager @Inject constructor(
     
     private var videoFramer: MoqMediaFramer? = null
     private var audioFramer: MoqAudioFramer? = null
-    private val localVideoTrackName = "webex.com/meeting123/alice/video"
-    private val localAudioTrackName = "webex.com/meeting123/alice/audio"
-    private val namespace: String = localVideoTrackName.substringBeforeLast("/")
+    
+    // Meeting Configuration
+    private val meetingId = "meeting123"
+    private val userName = "alice"
+    private val localPrefix = "webex.com/$meetingId/$userName"
 
-    private val otherVideoTrackName = "webex.com/meeting123/bob/video"
-    private val otherAudioTrackName = "webex.com/meeting123/bob/audio"
-    private val otherNamespace = otherVideoTrackName.substringBeforeLast("/")
+    private val localVideoTrackName = "$localPrefix/video"
+    private val localAudioTrackName = "$localPrefix/audio"
+
+    private val otherNamespace = "webex.com/$meetingId/bob"
+    private val otherVideoTrackName = "$otherNamespace/video"
+    private val otherAudioTrackName = "$otherNamespace/audio"
+    
     val connectionStatus: StateFlow<MoqConnectionStatus> = moqTransport.connectionStatus
 
     fun connectToRelay(url: String) {
@@ -118,23 +124,29 @@ class VideoSessionManager @Inject constructor(
         }
 
         // Subscribe to meeting namespace to discover all participants
-        moqTransport.subscribeNamespace(namespace, object : NamespaceSubscriptionCallback {
+        moqTransport.subscribeNamespace(otherNamespace, object : NamespaceSubscriptionCallback {
             override fun onMatch(trackName: String): Boolean {
-                if (trackName == otherVideoTrackName || trackName == otherAudioTrackName) {
+                // Ignore our own tracks to avoid loopback/echo
+                Log.i(tag, "Track Match: $trackName, ownTrack?($trackName == $otherAudioTrackName || $trackName == $otherAudioTrackName)")
+                if (trackName == localAudioTrackName || trackName == localVideoTrackName) {
                     Log.d(tag, "Ignoring own track: $trackName")
                     return false
                 }
-
-                Log.i(tag, "Namespace Match Found: $trackName")
+                Log.i(tag, "Track Discovered: $trackName")
                 val trackKey = TrackUtil.generateTrackKeyFromFullName(trackName)
 
                 if (trackName.contains("audio")) {
-                    Log.i(tag, "Audio track detected, starting native playback for trackKey=$trackKey")
-                    nativeAudioLib.startPlayback(trackKey)
+                    Log.i(tag, "Audio track detected: trackName=$trackName trackKey=$trackKey")
+                    val started = nativeAudioLib.startPlayback(trackKey)
+                    Log.i(tag, "Native audio playback started for trackKey=$trackKey: $started")
                 }
 
                 moqTransport.trackCallbacks[trackKey] = object : MoqObjectCallback {
                     override fun onObject(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer) {
+                        if (trackName == localAudioTrackName || trackName == localVideoTrackName) {
+                            Log.d(tag, "Ignoring own track: $trackName")
+                            return
+                        }
                         if (trackName.contains("video")) {
                             decoders[trackKey]?.let { decoder ->
                                 try {
@@ -149,15 +161,18 @@ class VideoSessionManager @Inject constructor(
                                         }
                                     }
                                 } catch (e: IllegalStateException) {
-                                    // Ignore if shutting down
                                 } catch (e: Exception) {
                                     Log.e(tag, "Error feeding video decoder for $trackKey", e)
                                 }
                             }
                             addRemoteParticipant(trackKey)
                         } else if (trackName.contains("audio")) {
-                            // Feed native decoder
-                            nativeAudioLib.feedDecoder(trackKey, payload, payload.remaining())
+                            // Feed native Oboe decoder
+                            val size = payload.remaining()
+                            nativeAudioLib.feedDecoder(trackKey, payload, size)
+                            if (objectId % 100 == 0L) {
+                                Log.d(tag, "Fed audio to native decoder: trackKey=$trackKey groupId=$groupId objectId=$objectId size=$size")
+                            }
                         }
                     }
                 }
@@ -166,11 +181,12 @@ class VideoSessionManager @Inject constructor(
             }
         })
 
-        moqTransport.publish(otherVideoTrackName)
-        videoFramer = MoqMediaFramer(moqTransport, otherVideoTrackName)
+        // Publish our tracks
+        moqTransport.publish(localVideoTrackName)
+        videoFramer = MoqMediaFramer(moqTransport, localVideoTrackName)
 
-        moqTransport.publish(otherAudioTrackName)
-        audioFramer = MoqAudioFramer(moqTransport, otherAudioTrackName)
+        moqTransport.publish(localAudioTrackName)
+        audioFramer = MoqAudioFramer(moqTransport, localAudioTrackName)
 
         setupEncoder()
         setupCamera(lifecycleOwner)
@@ -178,15 +194,22 @@ class VideoSessionManager @Inject constructor(
     }
 
     private fun startNativeAudio() {
-        nativeAudioLib.startCapture(object : NativeAudioLib.NativeAudioCallback {
+        Log.i(tag, "Starting native audio capture")
+        val started = nativeAudioLib.startCapture(object : NativeAudioLib.NativeAudioCallback {
+            private var frameCount = 0
             override fun onAudioEncoded(payload: ByteBuffer, size: Int, presentationTimeUs: Long) {
                 if (isMicEnabled) {
                     val info = MediaCodec.BufferInfo()
                     info.set(0, size, presentationTimeUs, 0)
                     audioFramer?.processFrame(payload, info)
+                    frameCount++
+                    if (frameCount % 100 == 0) {
+                        Log.d(tag, "Native audio captured: frames=$frameCount lastSize=$size")
+                    }
                 }
             }
         })
+        Log.i(tag, "Native audio capture started: $started")
     }
 
     private fun addRemoteParticipant(trackKey: String) {
@@ -366,11 +389,7 @@ class VideoSessionManager @Inject constructor(
                                 decoder.releaseOutputBuffer(outIndex, true)
                             }
                             handler.post(this)
-                        } catch (e: IllegalStateException) {
-                            // Ignore if shutting down
-                        } catch (e: Exception) {
-                            Log.e(tag, "Video playback error for trackKey=$id", e)
-                        }
+                        } catch (e: Exception) { }
                     }
                 }
             })

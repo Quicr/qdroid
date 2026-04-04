@@ -28,8 +28,6 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
     private val _connectionStatus = MutableStateFlow(MoqConnectionStatus.IDLE)
     override val connectionStatus: StateFlow<MoqConnectionStatus> = _connectionStatus.asStateFlow()
     private var connectionJob: Job? = null
-
-    override var discoveryListener: MoqDiscoveryListener? = null
     
     override fun connect(url: String, deviceId: String) {
         connectionJob?.cancel()
@@ -73,8 +71,6 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
             callback.onObject(trackName, groupId, objectId, payload)
         } else {
             Log.w(TAG, "No callback registered for trackKey=$trackKey (trackName=$trackName). Available keys: ${trackCallbacks.keys}")
-            // WebRTC-style media discovery: notify listener that an unknown track is sending media
-            discoveryListener?.onTrackDiscovered(trackName, groupId, objectId, payload)
         }
     }
 
@@ -109,6 +105,7 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
         if (!payload.isDirect) {
             throw IllegalArgumentException("Payload must be a direct ByteBuffer for zero-copy")
         }
+
         nativeSendObject(
             nativePtr,
             trackName,
