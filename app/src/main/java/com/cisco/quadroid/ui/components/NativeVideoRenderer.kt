@@ -15,8 +15,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 
 /**
  * NativeVideoRenderer for remote participants.
- * It applies a -90 degree rotation to offset the 90-degree clockwise shift
- * commonly found in incoming raw video frames.
+ * Maintains aspect ratio of the incoming feed via Modifier.aspectRatio.
+ * Corrects the 90-degree clockwise rotation in raw video frames.
  */
 @Composable
 fun NativeVideoRenderer(
@@ -28,7 +28,8 @@ fun NativeVideoRenderer(
 ) {
     val currentOnSurfaceCreated = rememberUpdatedState(onSurfaceCreated)
     val currentOnSurfaceDestroyed = rememberUpdatedState(onSurfaceDestroyed)
-    val targetAspectRatio = aspectRatio ?: (720f / 1280f)
+    // Default to portrait 9:16 (720/1280) if not specified
+    val videoAspectRatio = aspectRatio ?: (720f / 1280f)
 
     AndroidView(
         factory = { context ->
@@ -36,11 +37,11 @@ fun NativeVideoRenderer(
                 surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                     override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
                         currentOnSurfaceCreated.value(Surface(st))
-                        applyRemoteTransform(this@apply, width, height, mirrorHorizontal)
+                        applyTransform(this@apply, width, height, -90f, mirrorHorizontal)
                     }
 
                     override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {
-                        applyRemoteTransform(this@apply, width, height, mirrorHorizontal)
+                        applyTransform(this@apply, width, height, -90f, mirrorHorizontal)
                     }
 
                     override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
@@ -60,17 +61,16 @@ fun NativeVideoRenderer(
             }
         },
         update = { view ->
-            applyRemoteTransform(view, view.width, view.height, mirrorHorizontal)
+            applyTransform(view, view.width, view.height, -90f, mirrorHorizontal)
             view.invalidateOutline()
         },
-        modifier = modifier.aspectRatio(targetAspectRatio)
+        modifier = modifier.aspectRatio(videoAspectRatio)
     )
 }
 
 /**
  * PreviewNativeVideoRenderer for local preview (PIP/Solo).
- * Does not apply any rotation transformations, relying on the source (e.g. CameraX)
- * to provide a correctly oriented buffer for the surface.
+ * Maintains aspect ratio via Modifier.aspectRatio.
  */
 @Composable
 fun PreviewNativeVideoRenderer(
@@ -82,7 +82,7 @@ fun PreviewNativeVideoRenderer(
 ) {
     val currentOnSurfaceCreated = rememberUpdatedState(onSurfaceCreated)
     val currentOnSurfaceDestroyed = rememberUpdatedState(onSurfaceDestroyed)
-    val targetAspectRatio = aspectRatio ?: (720f / 1280f)
+    val videoAspectRatio = aspectRatio ?: (720f / 1280f)
 
     AndroidView(
         factory = { context ->
@@ -90,11 +90,11 @@ fun PreviewNativeVideoRenderer(
                 surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                     override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
                         currentOnSurfaceCreated.value(Surface(st))
-                        applyPreviewTransform(this@apply, width, height, mirrorHorizontal)
+                        applyTransform(this@apply, width, height, 0f, mirrorHorizontal)
                     }
 
                     override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {
-                        applyPreviewTransform(this@apply, width, height, mirrorHorizontal)
+                        applyTransform(this@apply, width, height, 0f, mirrorHorizontal)
                     }
 
                     override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
@@ -114,47 +114,45 @@ fun PreviewNativeVideoRenderer(
             }
         },
         update = { view ->
-            applyPreviewTransform(view, view.width, view.height, mirrorHorizontal)
+            applyTransform(view, view.width, view.height, 0f, mirrorHorizontal)
             view.invalidateOutline()
         },
-        modifier = modifier.aspectRatio(targetAspectRatio)
+        modifier = modifier.aspectRatio(videoAspectRatio)
     )
 }
 
 /**
- * Transform for remote video: corrects 90deg rotation and optionally mirrors.
+ * Universal transform logic for TextureView.
+ * Handles rotation and mirroring. Compensation scaling is applied to handle the aspect ratio swap
+ * when rotating in a non-square view.
  */
-private fun applyRemoteTransform(view: TextureView, viewWidth: Int, viewHeight: Int, mirror: Boolean) {
-    if (viewWidth == 0 || viewHeight == 0) return
-    val matrix = Matrix()
-    val centerX = viewWidth / 2f
-    val centerY = viewHeight / 2f
-    
-    // Rotate -90 to offset 90 clockwise shift
-    matrix.postRotate(-90f, centerX, centerY)
-    
-    // Compensate for aspect ratio swap after rotation
-    val scaleX = viewHeight.toFloat() / viewWidth.toFloat()
-    val scaleY = viewWidth.toFloat() / viewHeight.toFloat()
-    matrix.postScale(scaleX, scaleY, centerX, centerY)
-    
-    if (mirror) {
-        matrix.postScale(-1f, 1f, centerX, centerY)
-    }
-    view.setTransform(matrix)
-}
+private fun applyTransform(
+    view: TextureView,
+    viewWidth: Int,
+    viewHeight: Int,
+    rotation: Float,
+    mirror: Boolean
+) {
+    if (viewWidth <= 0 || viewHeight <= 0) return
 
-/**
- * Transform for local preview: only applies mirroring, no rotation.
- */
-private fun applyPreviewTransform(view: TextureView, viewWidth: Int, viewHeight: Int, mirror: Boolean) {
-    if (viewWidth == 0 || viewHeight == 0) return
     val matrix = Matrix()
     val centerX = viewWidth / 2f
     val centerY = viewHeight / 2f
     
+    // 1. Apply rotation
+    if (rotation != 0f) {
+        matrix.postRotate(rotation, centerX, centerY)
+        
+        // After rotating -90, the X and Y axes are swapped. 
+        // TextureView defaultly stretches the buffer to fill viewWidth x viewHeight.
+        // We must compensate for this stretch to maintain the buffer's original proportions.
+        matrix.postScale(viewHeight.toFloat() / viewWidth.toFloat(), viewWidth.toFloat() / viewHeight.toFloat(), centerX, centerY)
+    }
+
+    // 2. Apply horizontal mirroring
     if (mirror) {
         matrix.postScale(-1f, 1f, centerX, centerY)
     }
+
     view.setTransform(matrix)
 }

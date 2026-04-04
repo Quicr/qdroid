@@ -5,6 +5,7 @@ import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
@@ -30,6 +31,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -124,11 +126,11 @@ class VideoSessionManager @Inject constructor(
         }
 
         // Subscribe to meeting namespace to discover all participants
-        moqTransport.subscribeNamespace(otherNamespace, object : NamespaceSubscriptionCallback {
+        moqTransport.subscribeNamespace(localPrefix, object : NamespaceSubscriptionCallback {
             override fun onMatch(trackName: String): Boolean {
                 // Ignore our own tracks to avoid loopback/echo
                 Log.i(tag, "Track Match: $trackName, ownTrack?($trackName == $otherAudioTrackName || $trackName == $otherAudioTrackName)")
-                if (trackName == localAudioTrackName || trackName == localVideoTrackName) {
+                if (trackName == otherAudioTrackName || trackName == otherVideoTrackName) {
                     Log.d(tag, "Ignoring own track: $trackName")
                     return false
                 }
@@ -143,7 +145,7 @@ class VideoSessionManager @Inject constructor(
 
                 moqTransport.trackCallbacks[trackKey] = object : MoqObjectCallback {
                     override fun onObject(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer) {
-                        if (trackName == localAudioTrackName || trackName == localVideoTrackName) {
+                        if (trackName == otherAudioTrackName || trackName == otherVideoTrackName) {
                             Log.d(tag, "Ignoring own track: $trackName")
                             return
                         }
@@ -182,11 +184,11 @@ class VideoSessionManager @Inject constructor(
         })
 
         // Publish our tracks
-        moqTransport.publish(localVideoTrackName)
-        videoFramer = MoqMediaFramer(moqTransport, localVideoTrackName)
+        moqTransport.publish(otherVideoTrackName)
+        videoFramer = MoqMediaFramer(moqTransport, otherVideoTrackName)
 
-        moqTransport.publish(localAudioTrackName)
-        audioFramer = MoqAudioFramer(moqTransport, localAudioTrackName)
+        moqTransport.publish(otherAudioTrackName)
+        audioFramer = MoqAudioFramer(moqTransport, otherAudioTrackName)
 
         setupEncoder()
         setupCamera(lifecycleOwner)
@@ -221,6 +223,37 @@ class VideoSessionManager @Inject constructor(
             if (!_remoteParticipants.value.any { it.id == trackKey }) {
                 val stream = ParticipantStream(trackKey)
                 _remoteParticipants.value = _remoteParticipants.value + stream
+            }
+        }
+    }
+
+    private fun updateParticipantFormat(id: String, format: MediaFormat) {
+        // Use string literals for crop keys to support API 30+
+        val cropLeft = if (format.containsKey("crop-left")) format.getInteger("crop-left") else 0
+        val cropRight = if (format.containsKey("crop-right")) format.getInteger("crop-right") else format.getInteger(MediaFormat.KEY_WIDTH) - 1
+        val cropTop = if (format.containsKey("crop-top")) format.getInteger("crop-top") else 0
+        val cropBottom = if (format.containsKey("crop-bottom")) format.getInteger("crop-bottom") else format.getInteger(MediaFormat.KEY_HEIGHT) - 1
+
+        val width = cropRight - cropLeft + 1
+        val height = cropBottom - cropTop + 1
+
+        var parWidth = 1
+        var parHeight = 1
+        
+        // KEY_PIXEL_ASPECT_RATIO_WIDTH/HEIGHT are "sar-width" and "sar-height"
+        if (format.containsKey("sar-width")) {
+            parWidth = format.getInteger("sar-width")
+        }
+        if (format.containsKey("sar-height")) {
+            parHeight = format.getInteger("sar-height")
+        }
+
+        val aspectRatio = (width.toFloat() * parWidth) / (height.toFloat() * parHeight)
+        Log.i(tag, "Decoder format changed for $id: ${width}x${height}, SAR: ${parWidth}:${parHeight}, AR: $aspectRatio")
+
+        _remoteParticipants.update { participants ->
+            participants.map { 
+                if (it.id == id) it.copy(aspectRatio = aspectRatio) else it
             }
         }
     }
@@ -387,6 +420,8 @@ class VideoSessionManager @Inject constructor(
                             val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 10000)
                             if (outIndex >= 0) {
                                 decoder.releaseOutputBuffer(outIndex, true)
+                            } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                                updateParticipantFormat(id, decoder.outputFormat)
                             }
                             handler.post(this)
                         } catch (e: Exception) { }
@@ -440,4 +475,4 @@ class VideoSessionManager @Inject constructor(
     }
 }
 
-data class ParticipantStream(val id: String)
+data class ParticipantStream(val id: String, val aspectRatio: Float = 9f / 16f)

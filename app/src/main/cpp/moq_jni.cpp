@@ -736,13 +736,22 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
         .immutable_extensions = std::nullopt
     };
 
-    quicr::BytesSpan data_span(data, payload_size);
-    auto status = handler->PublishObject(headers, data_span);
+    try {
+        quicr::BytesSpan data_span(data, payload_size);
+        auto status = handler->PublishObject(headers, data_span);
 
-    if (status != quicr::PublishTrackHandler::PublishObjectStatus::kOk) {
-        LOGE("nativeSendObject: PublishObject failed with status %d", static_cast<int>(status));
-    } else {
-        LOGI("nativeSendObject: Sent object to track %s, with status kOK", name.c_str());
+        if (status != quicr::PublishTrackHandler::PublishObjectStatus::kOk) {
+            LOGE("nativeSendObject: PublishObject failed with status %d", static_cast<int>(status));
+        } else {
+            // Log only occasionally to avoid spamming
+            if (object_id % 100 == 0) {
+                LOGI("nativeSendObject: Sent object to track %s, with status kOK", name.c_str());
+            }
+        }
+    } catch (const std::exception& e) {
+        LOGE("nativeSendObject: Exception in PublishObject: %s", e.what());
+    } catch (...) {
+        LOGE("nativeSendObject: Unknown exception in PublishObject");
     }
 }
 

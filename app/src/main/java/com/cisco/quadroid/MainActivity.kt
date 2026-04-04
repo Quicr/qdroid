@@ -229,7 +229,7 @@ fun MainScreen(viewModel: MainViewModel) {
                         isVideoEnabled = isVideoEnabled,
                         videoToggleCount = videoToggleCount,
                         isFrontCamera = isFrontCamera,
-                        videoAspectRatio = videoAspectRatio,
+                        localAspectRatio = videoAspectRatio,
                         onLocalPreviewSurfaceReady = { surface -> viewModel.onLocalPreviewSurfaceReady(surface) },
                         onRemoteSurfaceReady = { id, surface -> viewModel.onRemoteSurfaceReady(id, surface) },
                         onRemoteSurfaceDestroyed = { id -> viewModel.onRemoteSurfaceDestroyed(id) },
@@ -548,7 +548,7 @@ fun InCallScreen(
     isVideoEnabled: Boolean,
     videoToggleCount: Int,
     isFrontCamera: Boolean,
-    videoAspectRatio: Float,
+    localAspectRatio: Float,
     onLocalPreviewSurfaceReady: (android.view.Surface) -> Unit,
     onRemoteSurfaceReady: (String, android.view.Surface) -> Unit,
     onRemoteSurfaceDestroyed: (String) -> Unit,
@@ -583,7 +583,7 @@ fun InCallScreen(
                             onSurfaceDestroyed = { },
                             modifier = Modifier.fillMaxSize(),
                             mirrorHorizontal = isFrontCamera,
-                            aspectRatio = videoAspectRatio
+                            aspectRatio = localAspectRatio
                         )
                     }
                 } else {
@@ -596,8 +596,7 @@ fun InCallScreen(
                     participants = remoteParticipants,
                     onSurfaceReady = onRemoteSurfaceReady,
                     onSurfaceDestroyed = onRemoteSurfaceDestroyed,
-                    isLandscape = isLandscape,
-                    aspectRatio = videoAspectRatio
+                    isLandscape = isLandscape
                 )
             }
         }
@@ -628,7 +627,7 @@ fun InCallScreen(
                                 onSurfaceDestroyed = { },
                                 modifier = Modifier.fillMaxSize(),
                                 mirrorHorizontal = true,
-                                aspectRatio = videoAspectRatio
+                                aspectRatio = localAspectRatio
                             )
                         }
                     } else {
@@ -720,21 +719,20 @@ fun AdaptiveNativeGrid(
     participants: List<ParticipantStream>,
     onSurfaceReady: (String, android.view.Surface) -> Unit,
     onSurfaceDestroyed: (String) -> Unit,
-    isLandscape: Boolean,
-    aspectRatio: Float
+    isLandscape: Boolean
 ) {
     Log.d("AdaptiveNativeGrid", "Rendering grid with ${participants.size} participants")
     if (isLandscape) {
         Row(modifier = Modifier.fillMaxSize()) {
             participants.forEach { participant ->
                 key(participant.id) {
-                    Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    Box(modifier = Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
                         NativeVideoRenderer(
                             onSurfaceCreated = { onSurfaceReady(participant.id, it) },
                             onSurfaceDestroyed = { onSurfaceDestroyed(participant.id) },
                             modifier = Modifier.fillMaxSize(),
                             mirrorHorizontal = true,
-                            aspectRatio = aspectRatio
+                            aspectRatio = participant.aspectRatio
                         )
                     }
                 }
@@ -745,62 +743,64 @@ fun AdaptiveNativeGrid(
             when (participants.size) {
                 1 -> {
                     key(participants[0].id) {
-                        NativeVideoRenderer(
-                            onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
-                            onSurfaceDestroyed = { onSurfaceDestroyed(participants[0].id) },
-                            modifier = Modifier.fillMaxSize(),
-                            mirrorHorizontal = true,
-                            aspectRatio = aspectRatio
-                        )
+                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            NativeVideoRenderer(
+                                onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
+                                onSurfaceDestroyed = { onSurfaceDestroyed(participants[0].id) },
+                                modifier = Modifier.fillMaxSize(),
+                                mirrorHorizontal = true,
+                                aspectRatio = participants[0].aspectRatio
+                            )
+                        }
                     }
                 }
                 2 -> {
                     participants.forEach { participant ->
                         key(participant.id) {
-                            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                            Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                                 NativeVideoRenderer(
                                     onSurfaceCreated = { onSurfaceReady(participant.id, it) },
                                     onSurfaceDestroyed = { onSurfaceDestroyed(participant.id) },
                                     modifier = Modifier.fillMaxSize(),
                                     mirrorHorizontal = true,
-                                    aspectRatio = aspectRatio
+                                    aspectRatio = participant.aspectRatio
                                 )
                             }
                         }
                     }
                 }
                 else -> {
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                         key(participants[0].id) {
                             NativeVideoRenderer(
                                 onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
                                 onSurfaceDestroyed = { onSurfaceDestroyed(participants[0].id) },
                                 modifier = Modifier.fillMaxSize(),
                                 mirrorHorizontal = true,
-                                aspectRatio = aspectRatio
+                                aspectRatio = participants[0].aspectRatio
                             )
                         }
                     }
                     Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                        Box(modifier = Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
                             key(participants[1].id) {
                                 NativeVideoRenderer(
                                     onSurfaceCreated = { onSurfaceReady(participants[1].id, it) },
                                     onSurfaceDestroyed = { onSurfaceDestroyed(participants[1].id) },
                                     modifier = Modifier.fillMaxSize(),
                                     mirrorHorizontal = true,
-                                    aspectRatio = aspectRatio
+                                    aspectRatio = participants[1].aspectRatio
                                 )
                             }
                         }
-                        Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                        Box(modifier = Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
                             key(participants[2].id) {
                                 NativeVideoRenderer(
                                     onSurfaceCreated = { onSurfaceReady(participants[2].id, it) },
                                     onSurfaceDestroyed = { onSurfaceDestroyed(participants[2].id) },
                                     modifier = Modifier.fillMaxSize(),
                                     mirrorHorizontal = true,
-                                    aspectRatio = aspectRatio
+                                    aspectRatio = participants[2].aspectRatio
                                 )
                             }
                         }
