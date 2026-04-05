@@ -1,158 +1,147 @@
 package com.cisco.quadroid.ui.components
 
-import android.graphics.Matrix
-import android.graphics.Outline
-import android.graphics.SurfaceTexture
 import android.util.Log
+import android.view.Gravity
 import android.view.Surface
-import android.view.TextureView
-import android.view.ViewOutlineProvider
-import androidx.compose.foundation.layout.aspectRatio
+import android.widget.FrameLayout
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
+import com.cisco.quadroid.MainViewModel
 
 /**
- * NativeVideoRenderer for remote participants.
- * Maintains aspect ratio of the incoming feed via Modifier.aspectRatio.
- * Corrects the 90-degree clockwise rotation in raw video frames.
+ * NativeVideoRenderer for remote participants using VideoSurfaceView.
+ * It corrects the 90-degree clockwise rotation common in remote feeds.
  */
 @Composable
 fun NativeVideoRenderer(
+    trackKey: String,
+    viewModel: MainViewModel,
     modifier: Modifier = Modifier,
-    onSurfaceCreated: (Surface) -> Unit,
-    onSurfaceDestroyed: () -> Unit,
     mirrorHorizontal: Boolean = false,
-    aspectRatio: Float? = null
+    aspectRatio: Float? = 0.0f
 ) {
-    val currentOnSurfaceCreated = rememberUpdatedState(onSurfaceCreated)
-    val currentOnSurfaceDestroyed = rememberUpdatedState(onSurfaceDestroyed)
-    // Default to portrait 9:16 (720/1280) if not specified
-    val videoAspectRatio = aspectRatio ?: (720f / 1280f)
 
-    AndroidView(
-        factory = { context ->
-            TextureView(context).apply {
-                surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                    override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
-                        currentOnSurfaceCreated.value(Surface(st))
-                        applyTransform(this@apply, width, height, -90f, mirrorHorizontal)
-                    }
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        AndroidView(
+            factory = { context ->
+                Log.d("NativeVideoRenderer", "Creating AspectRatioFrameLayout + VideoSurfaceView for trackKey: $trackKey")
 
-                    override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {
-                        applyTransform(this@apply, width, height, -90f, mirrorHorizontal)
-                    }
-
-                    override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
-                        currentOnSurfaceDestroyed.value()
-                        return true
-                    }
-
-                    override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+                val aspectRatioLayout = AspectRatioFrameLayout(context).apply {
+                    // Match the default scaling of PreviewNativeVideoRenderer
+                    scaleType = AspectRatioFrameLayout.ScaleType.FIT
                 }
 
-                clipToOutline = true
-                outlineProvider = object : ViewOutlineProvider() {
-                    override fun getOutline(view: android.view.View, outline: Outline) {
-                        outline.setRoundRect(0, 0, view.width, view.height, 48f)
+                val videoSurfaceView = VideoSurfaceView(context).apply {
+                    callback = object : VideoSurfaceView.Callback {
+                        override fun onSurfaceCreated(surface: Surface) {
+                            Log.d("NativeVideoRenderer", "Surface created for trackKey: $trackKey")
+                        }
+
+                        override fun onSurfaceDestroyed() {
+                            Log.d("NativeVideoRenderer", "Surface destroyed for trackKey: $trackKey")
+                        }
+
+                        override fun onVideoSizeChanged(width: Int, height: Int, rotation: Float) {
+                            val ratio = if (rotation == -90f || rotation == 90f) {
+                                height.toFloat() / width.toFloat()
+                            } else {
+                                width.toFloat() / height.toFloat()
+                            }
+                            aspectRatioLayout.setAspectRatio(ratio)
+                        }
                     }
                 }
+
+                aspectRatioLayout.addView(
+                    videoSurfaceView,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        Gravity.CENTER
+                    )
+                )
+
+                aspectRatioLayout
+            },
+            update = { aspectRatioLayout ->
+                val videoSurfaceView = aspectRatioLayout.getChildAt(0) as? VideoSurfaceView
+                videoSurfaceView?.let { view ->
+                    view.rotationAngle = -90f
+                    view.mirrorHorizontal = mirrorHorizontal
+
+                    viewModel.addVideoFrameListener(trackKey) { data, pts ->
+                        view.feedFrame(data, pts)
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+            onRelease = {
+                viewModel.removeVideoFrameListener(trackKey)
             }
-        },
-        update = { view ->
-            applyTransform(view, view.width, view.height, -90f, mirrorHorizontal)
-            view.invalidateOutline()
-        },
-        modifier = modifier.aspectRatio(videoAspectRatio)
-    )
+        )
+    }
 }
-
+//GEMINI: DO NOT MODIFY - START
 /**
- * PreviewNativeVideoRenderer for local preview (PIP/Solo).
- * Maintains aspect ratio via Modifier.aspectRatio.
+ * PreviewNativeVideoRenderer for local preview using VideoSurfaceView.
  */
 @Composable
 fun PreviewNativeVideoRenderer(
-    modifier: Modifier = Modifier,
     onSurfaceCreated: (Surface) -> Unit,
     onSurfaceDestroyed: () -> Unit,
+    modifier: Modifier = Modifier,
     mirrorHorizontal: Boolean = false,
     aspectRatio: Float? = null
 ) {
     val currentOnSurfaceCreated = rememberUpdatedState(onSurfaceCreated)
     val currentOnSurfaceDestroyed = rememberUpdatedState(onSurfaceDestroyed)
-    val videoAspectRatio = aspectRatio ?: (720f / 1280f)
 
-    AndroidView(
-        factory = { context ->
-            TextureView(context).apply {
-                surfaceTextureListener = object : TextureView.SurfaceTextureListener {
-                    override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
-                        currentOnSurfaceCreated.value(Surface(st))
-                        applyTransform(this@apply, width, height, 0f, mirrorHorizontal)
-                    }
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        AndroidView(
+            factory = { context ->
+                val aspectRatioLayout = AspectRatioFrameLayout(context)
+                aspectRatio?.let { aspectRatioLayout.setAspectRatio(it) }
 
-                    override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {
-                        applyTransform(this@apply, width, height, 0f, mirrorHorizontal)
-                    }
-
-                    override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
-                        currentOnSurfaceDestroyed.value()
-                        return true
-                    }
-
-                    override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
-                }
-
-                clipToOutline = true
-                outlineProvider = object : ViewOutlineProvider() {
-                    override fun getOutline(view: android.view.View, outline: Outline) {
-                        outline.setRoundRect(0, 0, view.width, view.height, 48f)
+                val videoSurfaceView = VideoSurfaceView(context).apply {
+                    callback = object : VideoSurfaceView.Callback {
+                        override fun onSurfaceCreated(surface: Surface) {
+                            currentOnSurfaceCreated.value(surface)
+                        }
+                        override fun onSurfaceDestroyed() {
+                            currentOnSurfaceDestroyed.value()
+                        }
+                        override fun onVideoSizeChanged(width: Int, height: Int, rotation: Float) {
+                            val ratio = width.toFloat() / height.toFloat()
+                            aspectRatioLayout.setAspectRatio(ratio)
+                        }
                     }
                 }
-            }
-        },
-        update = { view ->
-            applyTransform(view, view.width, view.height, 0f, mirrorHorizontal)
-            view.invalidateOutline()
-        },
-        modifier = modifier.aspectRatio(videoAspectRatio)
-    )
-}
 
-/**
- * Universal transform logic for TextureView.
- * Handles rotation and mirroring. Compensation scaling is applied to handle the aspect ratio swap
- * when rotating in a non-square view.
- */
-private fun applyTransform(
-    view: TextureView,
-    viewWidth: Int,
-    viewHeight: Int,
-    rotation: Float,
-    mirror: Boolean
-) {
-    if (viewWidth <= 0 || viewHeight <= 0) return
+                aspectRatioLayout.addView(
+                    videoSurfaceView,
+                    FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        Gravity.CENTER
+                    )
+                )
 
-    val matrix = Matrix()
-    val centerX = viewWidth / 2f
-    val centerY = viewHeight / 2f
-    
-    // 1. Apply rotation
-    if (rotation != 0f) {
-        matrix.postRotate(rotation, centerX, centerY)
-        
-        // After rotating -90, the X and Y axes are swapped. 
-        // TextureView defaultly stretches the buffer to fill viewWidth x viewHeight.
-        // We must compensate for this stretch to maintain the buffer's original proportions.
-        matrix.postScale(viewHeight.toFloat() / viewWidth.toFloat(), viewWidth.toFloat() / viewHeight.toFloat(), centerX, centerY)
+                aspectRatioLayout
+            },
+            update = { aspectRatioLayout ->
+                val videoSurfaceView = aspectRatioLayout.getChildAt(0) as? VideoSurfaceView
+                videoSurfaceView?.let { view ->
+                    view.rotationAngle = 0f
+                    view.mirrorHorizontal = mirrorHorizontal
+                }
+            },
+            modifier = Modifier.fillMaxSize()
+        )
     }
-
-    // 2. Apply horizontal mirroring
-    if (mirror) {
-        matrix.postScale(-1f, 1f, centerX, centerY)
-    }
-
-    view.setTransform(matrix)
+    //GEMINI: DO NOT MODIFY -END
 }

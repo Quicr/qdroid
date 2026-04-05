@@ -81,16 +81,16 @@ class MainViewModel @Inject constructor(
         videoSessionManager.enableAudio(newState)
     }
 
+    fun addVideoFrameListener(trackKey: String, listener: (ByteArray, Long) -> Unit) {
+        videoSessionManager.addVideoFrameListener(trackKey, listener)
+    }
+
+    fun removeVideoFrameListener(trackKey: String) {
+        videoSessionManager.removeVideoFrameListener(trackKey)
+    }
+
     fun onLocalPreviewSurfaceReady(surface: android.view.Surface) {
         videoSessionManager.setLocalPreviewSurface(surface)
-    }
-
-    fun onRemoteSurfaceReady(trackKey: String, surface: android.view.Surface) {
-        videoSessionManager.onRemoteSurfaceReady(trackKey, surface)
-    }
-
-    fun onRemoteSurfaceDestroyed(trackKey: String) {
-        videoSessionManager.onRemoteSurfaceDestroyed(trackKey)
     }
 
     fun endCall() {

@@ -19,9 +19,11 @@ class MoqMediaFramer(
 
     fun processFrame(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
         // Skip codec config frames (SPS/PPS), they are usually handled out-of-band or prefixed
+        /*
         if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
             return
         }
+         */
 
         val isKeyFrame = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
 

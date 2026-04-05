@@ -1,8 +1,10 @@
 package com.cisco.quadroid
 
 import android.Manifest
+import android.content.res.Configuration
 import android.os.Bundle
 import android.util.Log
+import android.view.Surface
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -97,6 +99,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -223,6 +226,7 @@ fun MainScreen(viewModel: MainViewModel) {
                 }
                 is CallUiState.InCall -> {
                     InCallScreen(
+                        viewModel = viewModel,
                         connectionStatus = connectionStatus,
                         remoteParticipants = remoteParticipants,
                         isMicEnabled = isMicEnabled,
@@ -231,8 +235,6 @@ fun MainScreen(viewModel: MainViewModel) {
                         isFrontCamera = isFrontCamera,
                         localAspectRatio = videoAspectRatio,
                         onLocalPreviewSurfaceReady = { surface -> viewModel.onLocalPreviewSurfaceReady(surface) },
-                        onRemoteSurfaceReady = { id, surface -> viewModel.onRemoteSurfaceReady(id, surface) },
-                        onRemoteSurfaceDestroyed = { id -> viewModel.onRemoteSurfaceDestroyed(id) },
                         onToggleVideo = { viewModel.toggleVideo(lifecycleOwner) },
                         onSwitchCamera = { viewModel.switchCamera(lifecycleOwner) },
                         onToggleAudio = { viewModel.toggleAudio() },
@@ -542,6 +544,7 @@ fun ConnectionStatusIcon(status: MoqConnectionStatus, modifier: Modifier = Modif
 
 @Composable
 fun InCallScreen(
+    viewModel: MainViewModel,
     connectionStatus: MoqConnectionStatus,
     remoteParticipants: List<ParticipantStream>,
     isMicEnabled: Boolean,
@@ -549,9 +552,7 @@ fun InCallScreen(
     videoToggleCount: Int,
     isFrontCamera: Boolean,
     localAspectRatio: Float,
-    onLocalPreviewSurfaceReady: (android.view.Surface) -> Unit,
-    onRemoteSurfaceReady: (String, android.view.Surface) -> Unit,
-    onRemoteSurfaceDestroyed: (String) -> Unit,
+    onLocalPreviewSurfaceReady: (Surface) -> Unit,
     onToggleVideo: () -> Unit,
     onSwitchCamera: () -> Unit,
     onToggleAudio: () -> Unit,
@@ -559,8 +560,8 @@ fun InCallScreen(
 ) {
     var showControls by remember { mutableStateOf(true) }
     
-    val configuration = androidx.compose.ui.platform.LocalConfiguration.current
-    val isLandscape = configuration.orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
     Box(
         modifier = Modifier
@@ -582,7 +583,7 @@ fun InCallScreen(
                             onSurfaceCreated = onLocalPreviewSurfaceReady,
                             onSurfaceDestroyed = { },
                             modifier = Modifier.fillMaxSize(),
-                            mirrorHorizontal = isFrontCamera,
+                            mirrorHorizontal = false, // Explicitly disabled mirroring
                             aspectRatio = localAspectRatio
                         )
                     }
@@ -593,9 +594,8 @@ fun InCallScreen(
                 }
             } else {
                 AdaptiveNativeGrid(
+                    viewModel = viewModel,
                     participants = remoteParticipants,
-                    onSurfaceReady = onRemoteSurfaceReady,
-                    onSurfaceDestroyed = onRemoteSurfaceDestroyed,
                     isLandscape = isLandscape
                 )
             }
@@ -626,7 +626,7 @@ fun InCallScreen(
                                 onSurfaceCreated = onLocalPreviewSurfaceReady,
                                 onSurfaceDestroyed = { },
                                 modifier = Modifier.fillMaxSize(),
-                                mirrorHorizontal = true,
+                                mirrorHorizontal = false, // Explicitly disabled mirroring
                                 aspectRatio = localAspectRatio
                             )
                         }
@@ -716,9 +716,8 @@ fun InCallScreen(
 
 @Composable
 fun AdaptiveNativeGrid(
+    viewModel: MainViewModel,
     participants: List<ParticipantStream>,
-    onSurfaceReady: (String, android.view.Surface) -> Unit,
-    onSurfaceDestroyed: (String) -> Unit,
     isLandscape: Boolean
 ) {
     Log.d("AdaptiveNativeGrid", "Rendering grid with ${participants.size} participants")
@@ -728,11 +727,10 @@ fun AdaptiveNativeGrid(
                 key(participant.id) {
                     Box(modifier = Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
                         NativeVideoRenderer(
-                            onSurfaceCreated = { onSurfaceReady(participant.id, it) },
-                            onSurfaceDestroyed = { onSurfaceDestroyed(participant.id) },
+                            trackKey = participant.id,
+                            viewModel = viewModel,
                             modifier = Modifier.fillMaxSize(),
-                            mirrorHorizontal = true,
-                            aspectRatio = participant.aspectRatio
+                            mirrorHorizontal = false // Explicitly disabled mirroring
                         )
                     }
                 }
@@ -745,11 +743,10 @@ fun AdaptiveNativeGrid(
                     key(participants[0].id) {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             NativeVideoRenderer(
-                                onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
-                                onSurfaceDestroyed = { onSurfaceDestroyed(participants[0].id) },
+                                trackKey = participants[0].id,
+                                viewModel = viewModel,
                                 modifier = Modifier.fillMaxSize(),
-                                mirrorHorizontal = true,
-                                aspectRatio = participants[0].aspectRatio
+                                mirrorHorizontal = false
                             )
                         }
                     }
@@ -759,11 +756,10 @@ fun AdaptiveNativeGrid(
                         key(participant.id) {
                             Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                                 NativeVideoRenderer(
-                                    onSurfaceCreated = { onSurfaceReady(participant.id, it) },
-                                    onSurfaceDestroyed = { onSurfaceDestroyed(participant.id) },
+                                    trackKey = participant.id,
+                                    viewModel = viewModel,
                                     modifier = Modifier.fillMaxSize(),
-                                    mirrorHorizontal = true,
-                                    aspectRatio = participant.aspectRatio
+                                    mirrorHorizontal = false
                                 )
                             }
                         }
@@ -773,11 +769,10 @@ fun AdaptiveNativeGrid(
                     Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                         key(participants[0].id) {
                             NativeVideoRenderer(
-                                onSurfaceCreated = { onSurfaceReady(participants[0].id, it) },
-                                onSurfaceDestroyed = { onSurfaceDestroyed(participants[0].id) },
+                                trackKey = participants[0].id,
+                                viewModel = viewModel,
                                 modifier = Modifier.fillMaxSize(),
-                                mirrorHorizontal = true,
-                                aspectRatio = participants[0].aspectRatio
+                                mirrorHorizontal = false
                             )
                         }
                     }
@@ -785,22 +780,20 @@ fun AdaptiveNativeGrid(
                         Box(modifier = Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
                             key(participants[1].id) {
                                 NativeVideoRenderer(
-                                    onSurfaceCreated = { onSurfaceReady(participants[1].id, it) },
-                                    onSurfaceDestroyed = { onSurfaceDestroyed(participants[1].id) },
+                                    trackKey = participants[1].id,
+                                    viewModel = viewModel,
                                     modifier = Modifier.fillMaxSize(),
-                                    mirrorHorizontal = true,
-                                    aspectRatio = participants[1].aspectRatio
+                                    mirrorHorizontal = false
                                 )
                             }
                         }
                         Box(modifier = Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
                             key(participants[2].id) {
                                 NativeVideoRenderer(
-                                    onSurfaceCreated = { onSurfaceReady(participants[2].id, it) },
-                                    onSurfaceDestroyed = { onSurfaceDestroyed(participants[2].id) },
+                                    trackKey = participants[2].id,
+                                    viewModel = viewModel,
                                     modifier = Modifier.fillMaxSize(),
-                                    mirrorHorizontal = true,
-                                    aspectRatio = participants[2].aspectRatio
+                                    mirrorHorizontal = false
                                 )
                             }
                         }

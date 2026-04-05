@@ -5,7 +5,6 @@ import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
-import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
@@ -50,9 +49,9 @@ class VideoSessionManager @Inject constructor(
     private val videoMimeType = MediaFormat.MIMETYPE_VIDEO_AVC
     private val width = 1280
     private val height = 720
-    private val bitRate = 2000000 
+    private val bitRate = 4000000
     private val frameRate = 30
-    private val iFrameInterval = 5
+    private val iFrameInterval = 2
 
     private val nativeAudioLib = NativeAudioLib()
     private var isMicEnabled = true
@@ -74,9 +73,8 @@ class VideoSessionManager @Inject constructor(
     private var encoderOutputFormat: MediaFormat? = null
     private var formatLatch = CountDownLatch(1)
 
-    private val decoders = ConcurrentHashMap<String, MediaCodec>()
-    private val decoderThreads = ConcurrentHashMap<String, HandlerThread>()
-    private val decoderHandlers = ConcurrentHashMap<String, Handler>()
+    // Listeners for raw video objects
+    private val videoFrameListeners = ConcurrentHashMap<String, (ByteArray, Long) -> Unit>()
 
     private val _remoteParticipants = MutableStateFlow<List<ParticipantStream>>(emptyList())
     val remoteParticipants: StateFlow<List<ParticipantStream>> = _remoteParticipants.asStateFlow()
@@ -93,13 +91,13 @@ class VideoSessionManager @Inject constructor(
     private val meetingId = "meeting123"
     private val userName = "alice"
     private val localPrefix = "webex.com/$meetingId/$userName"
+    private val meetingNamespace = "webex.com/$meetingId"
 
     private val localVideoTrackName = "$localPrefix/video"
     private val localAudioTrackName = "$localPrefix/audio"
-
-    private val otherNamespace = "webex.com/$meetingId/bob"
-    private val otherVideoTrackName = "$otherNamespace/video"
-    private val otherAudioTrackName = "$otherNamespace/audio"
+    private val remoteNamespace = "$meetingNamespace/bob"
+    private val remoteVideoTrackName = "$remoteNamespace/video"
+    private val remoteAudioTrackName = "$remoteNamespace/audio"
     
     val connectionStatus: StateFlow<MoqConnectionStatus> = moqTransport.connectionStatus
 
@@ -110,6 +108,16 @@ class VideoSessionManager @Inject constructor(
 
     fun disconnectFromRelay() {
         moqTransport.disconnect()
+    }
+
+    fun addVideoFrameListener(trackKey: String, listener: (ByteArray, Long) -> Unit) {
+        Log.d(tag, "addVideoFrameListener for $trackKey")
+        videoFrameListeners[trackKey] = listener
+    }
+
+    fun removeVideoFrameListener(trackKey: String) {
+        Log.d(tag, "removeVideoFrameListener for $trackKey")
+        videoFrameListeners.remove(trackKey)
     }
 
     fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String) {
@@ -126,55 +134,38 @@ class VideoSessionManager @Inject constructor(
         }
 
         // Subscribe to meeting namespace to discover all participants
-        moqTransport.subscribeNamespace(localPrefix, object : NamespaceSubscriptionCallback {
+        Log.i(tag, "Subscribing to namespace: $remoteNamespace")
+        moqTransport.subscribeNamespace(remoteNamespace, object : NamespaceSubscriptionCallback {
             override fun onMatch(trackName: String): Boolean {
-                // Ignore our own tracks to avoid loopback/echo
-                Log.i(tag, "Track Match: $trackName, ownTrack?($trackName == $otherAudioTrackName || $trackName == $otherAudioTrackName)")
-                if (trackName == otherAudioTrackName || trackName == otherVideoTrackName) {
+                if (trackName == localVideoTrackName || trackName == localAudioTrackName) {
                     Log.d(tag, "Ignoring own track: $trackName")
                     return false
                 }
+                
                 Log.i(tag, "Track Discovered: $trackName")
                 val trackKey = TrackUtil.generateTrackKeyFromFullName(trackName)
 
                 if (trackName.contains("audio")) {
-                    Log.i(tag, "Audio track detected: trackName=$trackName trackKey=$trackKey")
-                    val started = nativeAudioLib.startPlayback(trackKey)
-                    Log.i(tag, "Native audio playback started for trackKey=$trackKey: $started")
+                    Log.i(tag, "Starting native audio playback for $trackName")
+                    nativeAudioLib.startPlayback(trackKey)
                 }
 
                 moqTransport.trackCallbacks[trackKey] = object : MoqObjectCallback {
                     override fun onObject(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer) {
-                        if (trackName == otherAudioTrackName || trackName == otherVideoTrackName) {
-                            Log.d(tag, "Ignoring own track: $trackName")
-                            return
-                        }
                         if (trackName.contains("video")) {
-                            decoders[trackKey]?.let { decoder ->
-                                try {
-                                    val index = decoder.dequeueInputBuffer(10000)
-                                    if (index >= 0) {
-                                        val inputBuffer = decoder.getInputBuffer(index)
-                                        if (inputBuffer != null) {
-                                            inputBuffer.clear()
-                                            inputBuffer.put(payload)
-                                            val flags = if (objectId == 0L) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
-                                            decoder.queueInputBuffer(index, 0, payload.limit(), 0, flags)
-                                        }
-                                    }
-                                } catch (e: IllegalStateException) {
-                                } catch (e: Exception) {
-                                    Log.e(tag, "Error feeding video decoder for $trackKey", e)
+                            val listener = videoFrameListeners[trackKey]
+                            if (listener != null) {
+                                val bytes = ByteArray(payload.remaining())
+                                payload.get(bytes)
+                                listener(bytes, System.nanoTime() / 1000)
+                            } else {
+                                if (objectId % 100 == 0L) {
+                                    Log.w(tag, "No video listener for track $trackKey (trackName=$trackName)")
                                 }
                             }
                             addRemoteParticipant(trackKey)
                         } else if (trackName.contains("audio")) {
-                            // Feed native Oboe decoder
-                            val size = payload.remaining()
-                            nativeAudioLib.feedDecoder(trackKey, payload, size)
-                            if (objectId % 100 == 0L) {
-                                Log.d(tag, "Fed audio to native decoder: trackKey=$trackKey groupId=$groupId objectId=$objectId size=$size")
-                            }
+                            nativeAudioLib.feedDecoder(trackKey, payload, payload.remaining())
                         }
                     }
                 }
@@ -183,12 +174,14 @@ class VideoSessionManager @Inject constructor(
             }
         })
 
-        // Publish our tracks
-        moqTransport.publish(otherVideoTrackName)
-        videoFramer = MoqMediaFramer(moqTransport, otherVideoTrackName)
 
-        moqTransport.publish(otherAudioTrackName)
-        audioFramer = MoqAudioFramer(moqTransport, otherAudioTrackName)
+        // Publish our tracks
+        Log.i(tag, "Publishing tracks: $localAudioTrackName, $localVideoTrackName")
+        moqTransport.publish(localVideoTrackName)
+        videoFramer = MoqMediaFramer(moqTransport, localVideoTrackName)
+
+        moqTransport.publish(localAudioTrackName)
+        audioFramer = MoqAudioFramer(moqTransport, localAudioTrackName)
 
         setupEncoder()
         setupCamera(lifecycleOwner)
@@ -196,22 +189,15 @@ class VideoSessionManager @Inject constructor(
     }
 
     private fun startNativeAudio() {
-        Log.i(tag, "Starting native audio capture")
-        val started = nativeAudioLib.startCapture(object : NativeAudioLib.NativeAudioCallback {
-            private var frameCount = 0
+        nativeAudioLib.startCapture(object : NativeAudioLib.NativeAudioCallback {
             override fun onAudioEncoded(payload: ByteBuffer, size: Int, presentationTimeUs: Long) {
                 if (isMicEnabled) {
                     val info = MediaCodec.BufferInfo()
                     info.set(0, size, presentationTimeUs, 0)
                     audioFramer?.processFrame(payload, info)
-                    frameCount++
-                    if (frameCount % 100 == 0) {
-                        Log.d(tag, "Native audio captured: frames=$frameCount lastSize=$size")
-                    }
                 }
             }
         })
-        Log.i(tag, "Native audio capture started: $started")
     }
 
     private fun addRemoteParticipant(trackKey: String) {
@@ -223,37 +209,7 @@ class VideoSessionManager @Inject constructor(
             if (!_remoteParticipants.value.any { it.id == trackKey }) {
                 val stream = ParticipantStream(trackKey)
                 _remoteParticipants.value = _remoteParticipants.value + stream
-            }
-        }
-    }
-
-    private fun updateParticipantFormat(id: String, format: MediaFormat) {
-        // Use string literals for crop keys to support API 30+
-        val cropLeft = if (format.containsKey("crop-left")) format.getInteger("crop-left") else 0
-        val cropRight = if (format.containsKey("crop-right")) format.getInteger("crop-right") else format.getInteger(MediaFormat.KEY_WIDTH) - 1
-        val cropTop = if (format.containsKey("crop-top")) format.getInteger("crop-top") else 0
-        val cropBottom = if (format.containsKey("crop-bottom")) format.getInteger("crop-bottom") else format.getInteger(MediaFormat.KEY_HEIGHT) - 1
-
-        val width = cropRight - cropLeft + 1
-        val height = cropBottom - cropTop + 1
-
-        var parWidth = 1
-        var parHeight = 1
-        
-        // KEY_PIXEL_ASPECT_RATIO_WIDTH/HEIGHT are "sar-width" and "sar-height"
-        if (format.containsKey("sar-width")) {
-            parWidth = format.getInteger("sar-width")
-        }
-        if (format.containsKey("sar-height")) {
-            parHeight = format.getInteger("sar-height")
-        }
-
-        val aspectRatio = (width.toFloat() * parWidth) / (height.toFloat() * parHeight)
-        Log.i(tag, "Decoder format changed for $id: ${width}x${height}, SAR: ${parWidth}:${parHeight}, AR: $aspectRatio")
-
-        _remoteParticipants.update { participants ->
-            participants.map { 
-                if (it.id == id) it.copy(aspectRatio = aspectRatio) else it
+                Log.i(tag, "Added remote participant: $trackKey. List size: ${_remoteParticipants.value.size}")
             }
         }
     }
@@ -333,6 +289,10 @@ class VideoSessionManager @Inject constructor(
             setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
             setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
+            // Prepend SPS/PPS to keyframes for easier decoding by late-joiners
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
+            }
         }
 
         try {
@@ -364,75 +324,6 @@ class VideoSessionManager @Inject constructor(
         }
     }
 
-    fun onRemoteSurfaceReady(trackKey: String, surface: Surface) {
-        decoders[trackKey]?.setOutputSurface(surface) ?: run {
-            val thread = HandlerThread("DecoderThread_$trackKey").apply { start() }
-            val handler = Handler(thread.looper)
-            decoderThreads[trackKey] = thread
-            decoderHandlers[trackKey] = handler
-
-            handler.post {
-                try {
-                    if (formatLatch.await(5, TimeUnit.SECONDS)) {
-                        setupDecoder(trackKey, surface)
-                    } else {
-                        setupDecoder(trackKey, surface)
-                    }
-                } catch (e: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                }
-            }
-        }
-    }
-    
-    fun onRemoteSurfaceDestroyed(trackKey: String) {
-        synchronized(this) {
-            decoderHandlers.remove(trackKey)?.removeCallbacksAndMessages(null)
-            decoders.remove(trackKey)?.apply {
-                try { stop(); release() } catch (e: Exception) { }
-            }
-            decoderThreads.remove(trackKey)?.quitSafely()
-            nativeAudioLib.stopPlayback(trackKey)
-        }
-    }
-
-    private fun setupDecoder(id: String, surface: Surface) {
-        val format = encoderOutputFormat?.let {
-            val newFormat = MediaFormat.createVideoFormat(videoMimeType, width, height)
-            if (it.containsKey("csd-0")) newFormat.setByteBuffer("csd-0", it.getByteBuffer("csd-0"))
-            if (it.containsKey("csd-1")) newFormat.setByteBuffer("csd-1", it.getByteBuffer("csd-1"))
-            newFormat
-        } ?: MediaFormat.createVideoFormat(videoMimeType, width, height)
-        
-        val handler = decoderHandlers[id] ?: return
-
-        try {
-            val decoder = MediaCodec.createDecoderByType(videoMimeType)
-            decoder.configure(format, surface, null, 0)
-            decoder.start()
-            decoders[id] = decoder
-            
-            handler.post(object : Runnable {
-                override fun run() {
-                    if (decoders.containsKey(id)) {
-                        val bufferInfo = MediaCodec.BufferInfo()
-                        try {
-                            val outIndex = decoder.dequeueOutputBuffer(bufferInfo, 10000)
-                            if (outIndex >= 0) {
-                                decoder.releaseOutputBuffer(outIndex, true)
-                            } else if (outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                                updateParticipantFormat(id, decoder.outputFormat)
-                            }
-                            handler.post(this)
-                        } catch (e: Exception) { }
-                    }
-                }
-            })
-        } catch (e: Exception) {
-            Log.e(tag, "Failed to setup video decoder for $id", e)
-        }
-    }
-
     fun enableVideo(enabled: Boolean, owner: LifecycleOwner) {
         if (enabled) bindCameraUseCases(owner) else cameraProvider?.unbindAll()
     }
@@ -453,16 +344,6 @@ class VideoSessionManager @Inject constructor(
         
         nativeAudioLib.stopCapture()
         
-        decoderHandlers.forEach { (_, h) -> h.removeCallbacksAndMessages(null) }
-        decoderHandlers.clear()
-        decoders.forEach { (id, d) -> 
-            try { d.stop(); d.release() } catch(e: Exception) {}
-            nativeAudioLib.stopPlayback(id)
-        }
-        decoders.clear()
-        decoderThreads.forEach { (_, t) -> t.quitSafely() }
-        decoderThreads.clear()
-        
         inputSurface?.release()
         inputSurface = null
         _remoteParticipants.value = emptyList()
@@ -472,7 +353,8 @@ class VideoSessionManager @Inject constructor(
         formatLatch = CountDownLatch(1)
         videoFramer = null
         audioFramer = null
+        videoFrameListeners.clear()
     }
 }
 
-data class ParticipantStream(val id: String, val aspectRatio: Float = 9f / 16f)
+data class ParticipantStream(val id: String, val aspectRatio: Float = 16f / 9f)
