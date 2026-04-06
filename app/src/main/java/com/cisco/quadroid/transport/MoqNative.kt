@@ -132,6 +132,18 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
         if (nativePtr != 0L) nativeSetNamespaceDefaultBehavior(nativePtr, acceptAll)
     }
 
+    override fun unsubscribeNamespace(namespacePrefix: String) {
+        if (nativePtr != 0L) nativeUnsubscribeNamespace(nativePtr, namespacePrefix)
+    }
+
+    override fun unpublishTrack(trackName: String) {
+        if (nativePtr != 0L) nativeUnpublish(nativePtr, trackName)
+    }
+
+    override fun unpublishNamespace(namespacePrefix: String) {
+        if (nativePtr != 0L) nativeUnpublishNamespace(nativePtr, namespacePrefix)
+    }
+
     private fun trackKey(fullName: String): String = TrackUtil.generateTrackKeyFromFullName(fullName)
 
     private external fun nativeConnect(url: String, deviceId: String): Long
@@ -151,7 +163,8 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
         useDatagram: Boolean
     )
     private external fun nativeSubscribe(ptr: Long, trackName: String, callback: MoqObjectCallback)
-    private external fun nativeUnsubscribe(ptr: Long, trackName: String)
     private external fun nativeSubscribeNamespace(ptr: Long, namespacePrefix: String, callback: NamespaceSubscriptionCallback)
+    private external fun nativeUnpublishNamespace(ptr: Long, namespacePrefix: String)
+    private external fun nativeUnsubscribeNamespace(ptr: Long, namespacePrefix: String)
     private external fun nativeSetNamespaceDefaultBehavior(ptr: Long, acceptAll: Boolean)
 }

@@ -513,8 +513,9 @@ private:
 
 struct MoqContext {
     std::shared_ptr<AndroidMoqClient> client;
-    std::shared_ptr<AndroidPublishNamespaceHandler> publish_ns_handler;
-    std::shared_ptr<AndroidSubscribeNamespaceHandler> subscribe_ns_handler;
+    std::unordered_map<std::string, std::shared_ptr<AndroidPublishNamespaceHandler>> publish_ns_handlers;
+    std::unordered_map<std::string, std::shared_ptr<AndroidSubscribeNamespaceHandler>> subscribe_ns_handlers;
+    std::mutex ns_handlers_mutex;
     jobject kotlin_callback_ref = nullptr;
 
     ~MoqContext() {
@@ -522,6 +523,13 @@ struct MoqContext {
         if (g_jvm && g_jvm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
             if (kotlin_callback_ref) {
                 env->DeleteGlobalRef(kotlin_callback_ref);
+            }
+
+            // Clean up subscribe namespace handler callbacks
+            for (auto& [ns_prefix, handler] : subscribe_ns_handlers) {
+                if (handler && handler->GetCallbackRef()) {
+                    env->DeleteGlobalRef(handler->GetCallbackRef());
+                }
             }
         }
     }
@@ -614,8 +622,14 @@ Java_com_cisco_quadroid_transport_MoqNative_nativePublishNamespace(JNIEnv *env, 
     LOGI("nativePublishNamespace: prefix=%s", prefix.c_str());
 
     auto track_ns = make_track_namespace(prefix);
-    context->publish_ns_handler = AndroidPublishNamespaceHandler::Create(track_ns);
-    context->client->PublishNamespace(context->publish_ns_handler);
+    auto handler = AndroidPublishNamespaceHandler::Create(track_ns);
+
+    {
+        std::lock_guard<std::mutex> lock(context->ns_handlers_mutex);
+        context->publish_ns_handlers[prefix] = handler;
+    }
+
+    context->client->PublishNamespace(handler);
 
     LOGI("nativePublishNamespace: Announced namespace %s", prefix.c_str());
 }
@@ -833,21 +847,26 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSubscribeNamespace(JNIEnv *env
     auto track_ns = make_track_namespace(prefix);
     jobject callback_ref = env->NewGlobalRef(callback);
 
-    context->subscribe_ns_handler = AndroidSubscribeNamespaceHandler::Create(track_ns, callback_ref);
-    context->client->SubscribeNamespace(context->subscribe_ns_handler);
+    auto handler = AndroidSubscribeNamespaceHandler::Create(track_ns, callback_ref);
+
+    {
+        std::lock_guard<std::mutex> lock(context->ns_handlers_mutex);
+        context->subscribe_ns_handlers[prefix] = handler;
+    }
+
+    context->client->SubscribeNamespace(handler);
 
     // Wait for OK status
     int retries = 50; // 5 seconds
-    while (context->subscribe_ns_handler->GetStatus() != quicr::SubscribeNamespaceHandler::Status::kOk && retries-- > 0) {
+    while (handler->GetStatus() != quicr::SubscribeNamespaceHandler::Status::kOk && retries-- > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        if (context->subscribe_ns_handler->GetStatus() ==
-            quicr::SubscribeNamespaceHandler::Status::kError) {
+        if (handler->GetStatus() == quicr::SubscribeNamespaceHandler::Status::kError) {
             LOGE("nativeSubscribeNamespace: SubscribeNamespace failed with error status");
             return;
         }
     }
 
-    if (context->subscribe_ns_handler->GetStatus() == quicr::SubscribeNamespaceHandler::Status::kOk) {
+    if (handler->GetStatus() == quicr::SubscribeNamespaceHandler::Status::kOk) {
         LOGI("nativeSubscribeNamespace: Status is OK");
     } else {
         LOGE("nativeSubscribeNamespace: SubscribeNamespace failed to reach OK status");
@@ -871,4 +890,89 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSetNamespaceDefaultBehavior(JN
     }
 
     LOGI("nativeSetNamespaceDefaultBehavior: accept_all=%d", accept_all);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeUnpublishNamespace(JNIEnv *env, jobject thiz,
+                                                                     jlong ptr,
+                                                                     jstring namespace_prefix)
+{
+    auto context = reinterpret_cast<MoqContext *>(ptr);
+    std::string prefix = jstring_to_string(env, namespace_prefix);
+
+    if (!context || !context->client) {
+        LOGE("nativeUnpublishNamespace: Invalid context");
+        return;
+    }
+
+    std::shared_ptr<AndroidPublishNamespaceHandler> handler;
+
+    {
+        std::lock_guard<std::mutex> lock(context->ns_handlers_mutex);
+        auto it = context->publish_ns_handlers.find(prefix);
+        if (it != context->publish_ns_handlers.end()) {
+            handler = it->second;
+            context->publish_ns_handlers.erase(it);
+        }
+    }
+
+    if (handler) {
+        LOGI("nativeUnpublishNamespace: Unpublishing namespace %s", prefix.c_str());
+        context->client->UnpublishNamespace(handler);
+        LOGI("nativeUnpublishNamespace: Successfully unpublished namespace %s", prefix.c_str());
+    } else {
+        LOGE("nativeUnpublishNamespace: No active namespace publish for prefix: %s", prefix.c_str());
+    }
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeUnsubscribeNamespace(JNIEnv *env, jobject thiz,
+                                                                      jlong ptr,
+                                                                      jstring namespace_prefix)
+{
+    auto context = reinterpret_cast<MoqContext *>(ptr);
+    std::string prefix = jstring_to_string(env, namespace_prefix);
+
+    if (!context || !context->client) {
+        LOGE("nativeUnsubscribeNamespace: Invalid context");
+        return;
+    }
+
+    std::shared_ptr<AndroidSubscribeNamespaceHandler> handler;
+
+    {
+        std::lock_guard<std::mutex> lock(context->ns_handlers_mutex);
+        auto it = context->subscribe_ns_handlers.find(prefix);
+        if (it != context->subscribe_ns_handlers.end()) {
+            handler = it->second;
+            context->subscribe_ns_handlers.erase(it);
+        }
+    }
+
+    if (handler) {
+        LOGI("nativeUnsubscribeNamespace: Unsubscribing from namespace %s", prefix.c_str());
+        context->client->UnsubscribeNamespace(handler);
+
+        // Clean up the callback reference
+        if (handler->GetCallbackRef()) {
+            JNIEnv* env_for_cleanup = nullptr;
+            bool detach = false;
+            if (g_jvm->GetEnv(reinterpret_cast<void**>(&env_for_cleanup), JNI_VERSION_1_6) == JNI_EDETACHED) {
+                g_jvm->AttachCurrentThread(&env_for_cleanup, nullptr);
+                detach = true;
+            }
+
+            if (env_for_cleanup) {
+                env_for_cleanup->DeleteGlobalRef(handler->GetCallbackRef());
+            }
+
+            if (detach) g_jvm->DetachCurrentThread();
+        }
+
+        LOGI("nativeUnsubscribeNamespace: Successfully unsubscribed from namespace %s", prefix.c_str());
+    } else {
+        LOGE("nativeUnsubscribeNamespace: No active namespace subscription for prefix: %s", prefix.c_str());
+    }
 }

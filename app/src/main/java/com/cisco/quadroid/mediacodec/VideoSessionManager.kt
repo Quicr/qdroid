@@ -332,6 +332,14 @@ class VideoSessionManager @Inject constructor(
 
     @Synchronized
     fun stopSession() {
+        //Unpublish self tracks
+        moqTransport.unpublishTrack(localVideoTrackName)
+        moqTransport.unpublishTrack(localAudioTrackName)
+        //Unsubscribe namespace
+        moqTransport.unsubscribeNamespace(localPrefix)
+
+
+
         cameraProvider?.unbindAll()
         
         encoderHandler.removeCallbacksAndMessages(null)

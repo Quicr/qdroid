@@ -86,6 +86,24 @@ interface MoqTransport {
      * Configures default behavior for namespace matches.
      */
     fun setNamespaceDefaultBehavior(acceptAll: Boolean)
+
+    /**
+     * Unsubscribes from a namespace.
+     * @param namespacePrefix The namespace prefix to unsubscribe from.
+     */
+    fun unsubscribeNamespace(namespacePrefix: String)
+
+    /**
+     * Unpublishes (stops publishing) a track.
+     * @param trackName The track name to unpublish.
+     */
+    fun unpublishTrack(trackName: String)
+
+    /**
+     * Unpublishes (stops announcing) a namespace.
+     * @param namespacePrefix The namespace prefix to unpublish.
+     */
+    fun unpublishNamespace(namespacePrefix: String)
 }
 
 data class PublishOptions(
