@@ -121,7 +121,7 @@ class VideoSessionManager @Inject constructor(
     }
 
     fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String) {
-        stopSession()
+        cleanup()
 
         this.lifecycleOwner = lifecycleOwner
         this.rotation = rotation
@@ -134,10 +134,10 @@ class VideoSessionManager @Inject constructor(
         }
 
         // Subscribe to meeting namespace to discover all participants
-        Log.i(tag, "Subscribing to namespace: $remoteNamespace")
-        moqTransport.subscribeNamespace(remoteNamespace, object : NamespaceSubscriptionCallback {
+        Log.i(tag, "Subscribing to namespace: $localPrefix")
+        moqTransport.subscribeNamespace(localPrefix, object : NamespaceSubscriptionCallback {
             override fun onMatch(trackName: String): Boolean {
-                if (trackName == localVideoTrackName || trackName == localAudioTrackName) {
+                if (trackName == remoteVideoTrackName || trackName == remoteAudioTrackName) {
                     Log.d(tag, "Ignoring own track: $trackName")
                     return false
                 }
@@ -165,7 +165,15 @@ class VideoSessionManager @Inject constructor(
                             }
                             addRemoteParticipant(trackKey)
                         } else if (trackName.contains("audio")) {
-                            nativeAudioLib.feedDecoder(trackKey, payload, payload.remaining())
+                            if (objectId == 0L) {
+                                // Log codec config for debugging
+                                val bytes = ByteArray(payload.remaining())
+                                payload.duplicate().get(bytes)
+                                val hexString = bytes.joinToString(" ") { "%02X".format(it) }
+                                Log.i(tag, "Received codec config (object 0) for $trackName in group $groupId, size=${bytes.size}, data=[$hexString]")
+                            } else {
+                                nativeAudioLib.feedDecoder(trackKey, payload, payload.remaining())
+                            }
                         }
                     }
                 }
@@ -176,12 +184,12 @@ class VideoSessionManager @Inject constructor(
 
 
         // Publish our tracks
-        Log.i(tag, "Publishing tracks: $localAudioTrackName, $localVideoTrackName")
-        moqTransport.publish(localVideoTrackName)
-        videoFramer = MoqMediaFramer(moqTransport, localVideoTrackName)
+        Log.i(tag, "Publishing tracks: $remoteVideoTrackName, $remoteAudioTrackName")
+        moqTransport.publish(remoteVideoTrackName)
+        videoFramer = MoqMediaFramer(moqTransport, remoteVideoTrackName)
 
-        moqTransport.publish(localAudioTrackName)
-        audioFramer = MoqAudioFramer(moqTransport, localAudioTrackName)
+        moqTransport.publish(remoteAudioTrackName)
+        audioFramer = MoqAudioFramer(moqTransport, remoteAudioTrackName)
 
         setupEncoder()
         setupCamera(lifecycleOwner)
@@ -189,11 +197,16 @@ class VideoSessionManager @Inject constructor(
     }
 
     private fun startNativeAudio() {
+        var callbackCount = 0
         nativeAudioLib.startCapture(object : NativeAudioLib.NativeAudioCallback {
-            override fun onAudioEncoded(payload: ByteBuffer, size: Int, presentationTimeUs: Long) {
+            override fun onAudioEncoded(payload: ByteBuffer, size: Int, presentationTimeUs: Long, flags: Int) {
+                callbackCount++
+                if (callbackCount % 10 == 0) {
+                    Log.d(tag, "onAudioEncoded callback #$callbackCount, size=$size, flags=$flags, micEnabled=$isMicEnabled, framerExists=${audioFramer != null}")
+                }
                 if (isMicEnabled) {
                     val info = MediaCodec.BufferInfo()
-                    info.set(0, size, presentationTimeUs, 0)
+                    info.set(0, size, presentationTimeUs, flags)
                     audioFramer?.processFrame(payload, info)
                 }
             }
@@ -333,15 +346,16 @@ class VideoSessionManager @Inject constructor(
     @Synchronized
     fun stopSession() {
         //Unpublish self tracks
-        moqTransport.unpublishTrack(localVideoTrackName)
-        moqTransport.unpublishTrack(localAudioTrackName)
+        moqTransport.unpublishTrack(remoteVideoTrackName)
+        moqTransport.unpublishTrack(remoteAudioTrackName)
         //Unsubscribe namespace
         moqTransport.unsubscribeNamespace(localPrefix)
+        cleanup()
+    }
 
-
-
+    private fun cleanup() {
         cameraProvider?.unbindAll()
-        
+
         encoderHandler.removeCallbacksAndMessages(null)
         val currentEncoder = encoder
         encoder = null
@@ -349,14 +363,14 @@ class VideoSessionManager @Inject constructor(
             currentEncoder?.stop()
             currentEncoder?.release()
         } catch (e: Exception) {}
-        
+
         nativeAudioLib.stopCapture()
-        
+
         inputSurface?.release()
         inputSurface = null
         _remoteParticipants.value = emptyList()
         encoderOutputFormat = null
-        
+
         formatLatch.countDown()
         formatLatch = CountDownLatch(1)
         videoFramer = null

@@ -20,7 +20,7 @@ class NativeAudioLib {
     external fun feedDecoder(trackKey: String, payload: ByteBuffer, size: Int)
 
     interface NativeAudioCallback {
-        fun onAudioEncoded(payload: ByteBuffer, size: Int, presentationTimeUs: Long)
+        fun onAudioEncoded(payload: ByteBuffer, size: Int, presentationTimeUs: Long, flags: Int)
     }
 
     companion object {

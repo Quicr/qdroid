@@ -919,13 +919,12 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeUnpublishNamespace(JNIEnv *env
 
     if (handler) {
         LOGI("nativeUnpublishNamespace: Unpublishing namespace %s", prefix.c_str());
-        context->client->UnpublishNamespace(handler);
+        context->client->PublishNamespaceDone(handler);
         LOGI("nativeUnpublishNamespace: Successfully unpublished namespace %s", prefix.c_str());
     } else {
         LOGE("nativeUnpublishNamespace: No active namespace publish for prefix: %s", prefix.c_str());
     }
 }
-
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_cisco_quadroid_transport_MoqNative_nativeUnsubscribeNamespace(JNIEnv *env, jobject thiz,

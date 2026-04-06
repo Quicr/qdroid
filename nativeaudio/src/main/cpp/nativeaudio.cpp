@@ -24,7 +24,7 @@ public:
         env->GetJavaVM(&jvm);
         this->callback = env->NewGlobalRef(callback);
         jclass clazz = env->GetObjectClass(callback);
-        onAudioEncodedId = env->GetMethodID(clazz, "onAudioEncoded", "(Ljava/nio/ByteBuffer;IJ)V");
+        onAudioEncodedId = env->GetMethodID(clazz, "onAudioEncoded", "(Ljava/nio/ByteBuffer;IJI)V");
     }
 
     ~AudioCapture() {
@@ -48,19 +48,37 @@ public:
     }
 
     bool start() {
+        LOGD("AudioCapture::start() - Creating AAC encoder");
         encoder = AMediaCodec_createEncoderByType("audio/mp4a-latm");
+        if (!encoder) {
+            LOGE("AudioCapture::start() - Failed to create AAC encoder");
+            return false;
+        }
+
         AMediaFormat* format = AMediaFormat_new();
         AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, "audio/mp4a-latm");
         AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_SAMPLE_RATE, 48000);
         AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_CHANNEL_COUNT, 1);
         AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_BIT_RATE, 64000);
         AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_AAC_PROFILE, 2);
-        AMediaCodec_configure(encoder, format, nullptr, nullptr, AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
+
+        media_status_t status = AMediaCodec_configure(encoder, format, nullptr, nullptr, AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
         AMediaFormat_delete(format);
-        AMediaCodec_start(encoder);
+
+        if (status != AMEDIA_OK) {
+            LOGE("AudioCapture::start() - Failed to configure encoder, status=%d", status);
+            return false;
+        }
+
+        status = AMediaCodec_start(encoder);
+        if (status != AMEDIA_OK) {
+            LOGE("AudioCapture::start() - Failed to start encoder, status=%d", status);
+            return false;
+        }
+        LOGD("AudioCapture::start() - AAC encoder started successfully");
 
         AudioStreamBuilder builder;
-        builder.setDirection(Direction::Input)
+        Result result = builder.setDirection(Direction::Input)
                ->setPerformanceMode(PerformanceMode::LowLatency)
                ->setSharingMode(SharingMode::Exclusive)
                ->setFormat(AudioFormat::I16)
@@ -69,16 +87,34 @@ public:
                ->setCallback(this)
                ->openStream(stream);
 
+        if (result != Result::OK) {
+            LOGE("AudioCapture::start() - Failed to open Oboe stream, result=%d", (int)result);
+            return false;
+        }
+
         if (stream) {
-            stream->requestStart();
+            LOGD("AudioCapture::start() - Oboe stream opened successfully, requesting start");
+            result = stream->requestStart();
+            if (result != Result::OK) {
+                LOGE("AudioCapture::start() - Failed to start Oboe stream, result=%d", (int)result);
+                return false;
+            }
             isRunning = true;
+            LOGD("AudioCapture::start() - Oboe stream started successfully");
             return true;
         }
+        LOGE("AudioCapture::start() - Stream is null after openStream");
         return false;
     }
 
     DataCallbackResult onAudioReady(AudioStream *oboeStream, void *audioData, int32_t numFrames) override {
         if (!isRunning || !encoder) return DataCallbackResult::Stop;
+
+        // Log periodically to confirm audio capture is working
+        static int frameCount = 0;
+        if (++frameCount % 100 == 0) {
+            LOGD("AudioCapture::onAudioReady() - Captured %d frames", numFrames);
+        }
 
         // Feed Encoder
         ssize_t bufIdx = AMediaCodec_dequeueInputBuffer(encoder, 0);
@@ -92,18 +128,26 @@ public:
                                             std::chrono::duration_cast<std::chrono::microseconds>(
                                             std::chrono::system_clock::now().time_since_epoch()).count(), 0);
             }
+        } else {
+            if (frameCount % 100 == 0) {
+                LOGW("AudioCapture::onAudioReady() - Failed to dequeue input buffer");
+            }
         }
 
         // Drain Encoder
         AMediaCodecBufferInfo info;
         ssize_t outIdx = AMediaCodec_dequeueOutputBuffer(encoder, &info, 0);
+        static int encodedFrameCount = 0;
         while (isRunning && outIdx >= 0) {
             uint8_t* outBuf = AMediaCodec_getOutputBuffer(encoder, outIdx, nullptr);
             if (outBuf && info.size > 0 && callback) {
+                if (++encodedFrameCount % 100 == 0) {
+                    LOGD("AudioCapture::onAudioReady() - Encoded audio frame, size=%d, flags=%d", info.size, info.flags);
+                }
                 JNIEnv* env = getEnv();
                 if (env) {
                     jobject byteBuffer = env->NewDirectByteBuffer(outBuf + info.offset, info.size);
-                    env->CallVoidMethod(callback, onAudioEncodedId, byteBuffer, (jint)info.size, (jlong)info.presentationTimeUs);
+                    env->CallVoidMethod(callback, onAudioEncodedId, byteBuffer, (jint)info.size, (jlong)info.presentationTimeUs, (jint)info.flags);
                     env->DeleteLocalRef(byteBuffer);
                 }
             }
@@ -156,6 +200,14 @@ public:
         AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, "audio/mp4a-latm");
         AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_SAMPLE_RATE, 48000);
         AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_CHANNEL_COUNT, 1);
+
+        // Set AAC codec-specific data (AudioSpecificConfig)
+        // For AAC-LC (audioObjectType=2), 48kHz (samplingFrequencyIndex=3), mono (channelConfiguration=1)
+        // Byte 0: [5 bits audioObjectType][3 bits samplingFreqIndex] = [00010][001] = 0x11
+        // Byte 1: [1 bit samplingFreqIndex][4 bits channelConfig][3 bits padding] = [1][0001][000] = 0x88
+        uint8_t csd[2] = {0x11, 0x88};
+        AMediaFormat_setBuffer(format, "csd-0", csd, 2);
+
         AMediaCodec_configure(decoder, format, nullptr, nullptr, 0);
         AMediaFormat_delete(format);
         AMediaCodec_start(decoder);
