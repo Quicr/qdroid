@@ -19,9 +19,9 @@
 using namespace oboe;
 
 // Opus configuration matching ptt audio_engine.cpp
-constexpr int SAMPLE_RATE = 8000;
+constexpr int SAMPLE_RATE = 16000;
 constexpr int CHANNELS = 1;
-constexpr int FRAME_SIZE = 160; // 20ms at 8kHz
+constexpr int FRAME_SIZE = 320; // 20ms at 16kHz
 constexpr int MAX_PACKET_SIZE = 4000;
 constexpr int BITRATE = 16000;
 constexpr int PCM_BUFFER_SIZE = FRAME_SIZE * CHANNELS * sizeof(int16_t);
@@ -83,8 +83,10 @@ public:
         // Create Oboe audio stream
         AudioStreamBuilder builder;
         Result result = builder.setDirection(Direction::Input)
+                ->setUsage(oboe::Usage::Media)
+                ->setContentType(oboe::ContentType::Speech)
                ->setPerformanceMode(PerformanceMode::LowLatency)
-               ->setSharingMode(SharingMode::Exclusive)
+               ->setSharingMode(SharingMode::Shared)  // Allow device switching (e.g., USB-C headset)
                ->setFormat(AudioFormat::I16)
                ->setChannelCount(CHANNELS)
                ->setSampleRate(SAMPLE_RATE)
@@ -226,8 +228,10 @@ public:
         // Create Oboe audio stream
         AudioStreamBuilder builder;
         Result result = builder.setDirection(Direction::Output)
+                ->setUsage(oboe::Usage::Media)
+                ->setContentType(oboe::ContentType::Speech)
                ->setPerformanceMode(PerformanceMode::LowLatency)
-               ->setSharingMode(SharingMode::Exclusive)
+               ->setSharingMode(SharingMode::Shared)  // Allow device switching (e.g., USB-C headset)
                ->setFormat(AudioFormat::I16)
                ->setChannelCount(CHANNELS)
                ->setSampleRate(SAMPLE_RATE)

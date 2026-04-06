@@ -134,10 +134,10 @@ class VideoSessionManager @Inject constructor(
         }
 
         // Subscribe to meeting namespace to discover all participants
-        Log.i(tag, "Subscribing to namespace: $remoteNamespace")
-        moqTransport.subscribeNamespace(remoteNamespace, object : NamespaceSubscriptionCallback {
+        Log.i(tag, "Subscribing to namespace: $localPrefix")
+        moqTransport.subscribeNamespace(localPrefix, object : NamespaceSubscriptionCallback {
             override fun onMatch(trackName: String): Boolean {
-                if (trackName == localVideoTrackName || trackName == localAudioTrackName) {
+                if (trackName == remoteVideoTrackName || trackName == remoteAudioTrackName) {
                     Log.d(tag, "Ignoring own track: $trackName")
                     return false
                 }
@@ -177,12 +177,12 @@ class VideoSessionManager @Inject constructor(
 
 
         // Publish our tracks
-        Log.i(tag, "Publishing tracks: $localAudioTrackName, $localVideoTrackName")
-        moqTransport.publish(localVideoTrackName)
-        videoFramer = MoqMediaFramer(moqTransport, localVideoTrackName)
+        Log.i(tag, "Publishing tracks: $remoteAudioTrackName, $remoteVideoTrackName")
+        moqTransport.publish(remoteVideoTrackName)
+        videoFramer = MoqMediaFramer(moqTransport, remoteVideoTrackName)
 
-        moqTransport.publish(localAudioTrackName)
-        audioFramer = MoqAudioFramer(moqTransport, localAudioTrackName)
+        moqTransport.publish(remoteAudioTrackName)
+        audioFramer = MoqAudioFramer(moqTransport, remoteAudioTrackName)
 
         setupEncoder()
         setupCamera(lifecycleOwner)
@@ -339,10 +339,10 @@ class VideoSessionManager @Inject constructor(
     @Synchronized
     fun stopSession() {
         //Unpublish self tracks
-        moqTransport.unpublishTrack(localVideoTrackName)
-        moqTransport.unpublishTrack(localAudioTrackName)
+        moqTransport.unpublishTrack(remoteVideoTrackName)
+        moqTransport.unpublishTrack(remoteAudioTrackName)
         //Unsubscribe namespace
-        moqTransport.unsubscribeNamespace(remoteNamespace)
+        moqTransport.unsubscribeNamespace(localPrefix)
         cleanup()
     }
 
