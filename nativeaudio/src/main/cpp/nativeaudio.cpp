@@ -8,8 +8,8 @@
 #include <atomic>
 #include <android/log.h>
 #include <oboe/Oboe.h>
-#include <media/NdkMediaCodec.h>
-#include <media/NdkMediaFormat.h>
+#include <opus.h>
+#include "lockfree_queue.h"
 
 #define TAG "NativeAudio"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
@@ -17,6 +17,17 @@
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 
 using namespace oboe;
+
+// Opus configuration matching ptt audio_engine.cpp
+constexpr int SAMPLE_RATE = 8000;
+constexpr int CHANNELS = 1;
+constexpr int FRAME_SIZE = 160; // 20ms at 8kHz
+constexpr int MAX_PACKET_SIZE = 4000;
+constexpr int BITRATE = 16000;
+constexpr int PCM_BUFFER_SIZE = FRAME_SIZE * CHANNELS * sizeof(int16_t);
+
+// Lockless queue configuration
+constexpr uint32_t QUEUE_CAPACITY = 256; // Must be power of 2
 
 class AudioCapture : public AudioStreamCallback {
 public:
@@ -35,9 +46,13 @@ public:
             stream->close();
         }
 
+        if (encodeThread.joinable()) {
+            encodeThread.join();
+        }
+
         if (encoder) {
-            AMediaCodec_stop(encoder);
-            AMediaCodec_delete(encoder);
+            opus_encoder_destroy(encoder);
+            encoder = nullptr;
         }
 
         JNIEnv* env = getEnv();
@@ -48,42 +63,32 @@ public:
     }
 
     bool start() {
-        LOGD("AudioCapture::start() - Creating AAC encoder");
-        encoder = AMediaCodec_createEncoderByType("audio/mp4a-latm");
-        if (!encoder) {
-            LOGE("AudioCapture::start() - Failed to create AAC encoder");
+        LOGD("AudioCapture::start() - Creating Opus encoder");
+
+        // Create Opus encoder
+        int error;
+        encoder = opus_encoder_create(SAMPLE_RATE, CHANNELS, OPUS_APPLICATION_VOIP, &error);
+        if (error != OPUS_OK || !encoder) {
+            LOGE("AudioCapture::start() - Failed to create Opus encoder, error=%d", error);
             return false;
         }
 
-        AMediaFormat* format = AMediaFormat_new();
-        AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, "audio/mp4a-latm");
-        AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_SAMPLE_RATE, 48000);
-        AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_CHANNEL_COUNT, 1);
-        AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_BIT_RATE, 64000);
-        AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_AAC_PROFILE, 2);
+        // Configure Opus encoder
+        opus_encoder_ctl(encoder, OPUS_SET_BITRATE(BITRATE));
+        opus_encoder_ctl(encoder, OPUS_SET_VBR(1)); // Enable variable bitrate
+        opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(10)); // Max quality
 
-        media_status_t status = AMediaCodec_configure(encoder, format, nullptr, nullptr, AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
-        AMediaFormat_delete(format);
+        LOGD("AudioCapture::start() - Opus encoder created successfully");
 
-        if (status != AMEDIA_OK) {
-            LOGE("AudioCapture::start() - Failed to configure encoder, status=%d", status);
-            return false;
-        }
-
-        status = AMediaCodec_start(encoder);
-        if (status != AMEDIA_OK) {
-            LOGE("AudioCapture::start() - Failed to start encoder, status=%d", status);
-            return false;
-        }
-        LOGD("AudioCapture::start() - AAC encoder started successfully");
-
+        // Create Oboe audio stream
         AudioStreamBuilder builder;
         Result result = builder.setDirection(Direction::Input)
                ->setPerformanceMode(PerformanceMode::LowLatency)
                ->setSharingMode(SharingMode::Exclusive)
                ->setFormat(AudioFormat::I16)
-               ->setChannelCount(1)
-               ->setSampleRate(48000)
+               ->setChannelCount(CHANNELS)
+               ->setSampleRate(SAMPLE_RATE)
+               ->setFramesPerDataCallback(FRAME_SIZE)
                ->setCallback(this)
                ->openStream(stream);
 
@@ -92,68 +97,31 @@ public:
             return false;
         }
 
-        if (stream) {
-            LOGD("AudioCapture::start() - Oboe stream opened successfully, requesting start");
-            result = stream->requestStart();
-            if (result != Result::OK) {
-                LOGE("AudioCapture::start() - Failed to start Oboe stream, result=%d", (int)result);
-                return false;
-            }
-            isRunning = true;
-            LOGD("AudioCapture::start() - Oboe stream started successfully");
-            return true;
+        LOGD("AudioCapture::start() - Oboe stream opened successfully, requesting start");
+        result = stream->requestStart();
+        if (result != Result::OK) {
+            LOGE("AudioCapture::start() - Failed to start Oboe stream, result=%d", (int)result);
+            return false;
         }
-        LOGE("AudioCapture::start() - Stream is null after openStream");
-        return false;
+
+        isRunning = true;
+        encodeThread = std::thread(&AudioCapture::encodeLoop, this);
+
+        LOGD("AudioCapture::start() - Oboe stream started successfully");
+        return true;
     }
 
     DataCallbackResult onAudioReady(AudioStream *oboeStream, void *audioData, int32_t numFrames) override {
         if (!isRunning || !encoder) return DataCallbackResult::Stop;
 
-        // Log periodically to confirm audio capture is working
-        static int frameCount = 0;
-        if (++frameCount % 100 == 0) {
-            LOGD("AudioCapture::onAudioReady() - Captured %d frames", numFrames);
+        // Push PCM data to encoding queue
+        std::vector<int16_t> pcmData(static_cast<int16_t*>(audioData),
+                                     static_cast<int16_t*>(audioData) + numFrames);
+
+        if (!pcmQueue.push(pcmData)) {
+            LOGW("AudioCapture::onAudioReady() - PCM queue full, dropping frame");
         }
 
-        // Feed Encoder
-        ssize_t bufIdx = AMediaCodec_dequeueInputBuffer(encoder, 0);
-        if (bufIdx >= 0) {
-            size_t bufSize;
-            uint8_t* buf = AMediaCodec_getInputBuffer(encoder, bufIdx, &bufSize);
-            int32_t bytesToCopy = numFrames * sizeof(int16_t);
-            if (bytesToCopy <= (int32_t)bufSize) {
-                memcpy(buf, audioData, bytesToCopy);
-                AMediaCodec_queueInputBuffer(encoder, bufIdx, 0, bytesToCopy,
-                                            std::chrono::duration_cast<std::chrono::microseconds>(
-                                            std::chrono::system_clock::now().time_since_epoch()).count(), 0);
-            }
-        } else {
-            if (frameCount % 100 == 0) {
-                LOGW("AudioCapture::onAudioReady() - Failed to dequeue input buffer");
-            }
-        }
-
-        // Drain Encoder
-        AMediaCodecBufferInfo info;
-        ssize_t outIdx = AMediaCodec_dequeueOutputBuffer(encoder, &info, 0);
-        static int encodedFrameCount = 0;
-        while (isRunning && outIdx >= 0) {
-            uint8_t* outBuf = AMediaCodec_getOutputBuffer(encoder, outIdx, nullptr);
-            if (outBuf && info.size > 0 && callback) {
-                if (++encodedFrameCount % 100 == 0) {
-                    LOGD("AudioCapture::onAudioReady() - Encoded audio frame, size=%d, flags=%d", info.size, info.flags);
-                }
-                JNIEnv* env = getEnv();
-                if (env) {
-                    jobject byteBuffer = env->NewDirectByteBuffer(outBuf + info.offset, info.size);
-                    env->CallVoidMethod(callback, onAudioEncodedId, byteBuffer, (jint)info.size, (jlong)info.presentationTimeUs, (jint)info.flags);
-                    env->DeleteLocalRef(byteBuffer);
-                }
-            }
-            AMediaCodec_releaseOutputBuffer(encoder, outIdx, false);
-            outIdx = AMediaCodec_dequeueOutputBuffer(encoder, &info, 0);
-        }
         return DataCallbackResult::Continue;
     }
 
@@ -162,8 +130,54 @@ private:
     jobject callback = nullptr;
     jmethodID onAudioEncodedId;
     std::shared_ptr<AudioStream> stream;
-    AMediaCodec* encoder = nullptr;
+    OpusEncoder* encoder = nullptr;
     std::atomic<bool> isRunning{false};
+    std::thread encodeThread;
+
+    LockFreeQueue<std::vector<int16_t>, QUEUE_CAPACITY> pcmQueue;
+
+    void encodeLoop() {
+        std::vector<int16_t> pcmData;
+        std::vector<uint8_t> opusData(MAX_PACKET_SIZE);
+        int frameCount = 0;
+
+        while (isRunning) {
+            if (pcmQueue.pop(pcmData)) {
+                if (pcmData.size() != FRAME_SIZE) {
+                    LOGW("AudioCapture::encodeLoop() - Unexpected frame size: %zu", pcmData.size());
+                    continue;
+                }
+
+                // Encode with Opus
+                int encodedBytes = opus_encode(encoder, pcmData.data(), FRAME_SIZE,
+                                              opusData.data(), MAX_PACKET_SIZE);
+
+                if (encodedBytes < 0) {
+                    LOGE("AudioCapture::encodeLoop() - Opus encode error: %d", encodedBytes);
+                    continue;
+                }
+
+                if (++frameCount % 100 == 0) {
+                    LOGD("AudioCapture::encodeLoop() - Encoded frame %d, size=%d bytes",
+                         frameCount, encodedBytes);
+                }
+
+                // Send to Java callback
+                JNIEnv* env = getEnv();
+                if (env && callback) {
+                    jobject byteBuffer = env->NewDirectByteBuffer(opusData.data(), encodedBytes);
+                    auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count();
+                    env->CallVoidMethod(callback, onAudioEncodedId, byteBuffer,
+                                      (jint)encodedBytes, (jlong)timestamp, (jint)0);
+                    env->DeleteLocalRef(byteBuffer);
+                }
+            } else {
+                // Queue empty, sleep briefly
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+    }
 
     JNIEnv* getEnv() {
         JNIEnv* env;
@@ -186,112 +200,126 @@ public:
             stream->close();
         }
 
-        if (drainThread.joinable()) drainThread.join();
+        if (decodeThread.joinable()) {
+            decodeThread.join();
+        }
 
         if (decoder) {
-            AMediaCodec_stop(decoder);
-            AMediaCodec_delete(decoder);
+            opus_decoder_destroy(decoder);
+            decoder = nullptr;
         }
     }
 
     bool start() {
-        decoder = AMediaCodec_createDecoderByType("audio/mp4a-latm");
-        AMediaFormat* format = AMediaFormat_new();
-        AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, "audio/mp4a-latm");
-        AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_SAMPLE_RATE, 48000);
-        AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_CHANNEL_COUNT, 1);
+        LOGD("AudioPlayback::start() - Creating Opus decoder for %s", trackKey.c_str());
 
-        // Set AAC codec-specific data (AudioSpecificConfig)
-        // For AAC-LC (audioObjectType=2), 48kHz (samplingFrequencyIndex=3), mono (channelConfiguration=1)
-        // Byte 0: [5 bits audioObjectType][3 bits samplingFreqIndex] = [00010][001] = 0x11
-        // Byte 1: [1 bit samplingFreqIndex][4 bits channelConfig][3 bits padding] = [1][0001][000] = 0x88
-        uint8_t csd[2] = {0x11, 0x88};
-        AMediaFormat_setBuffer(format, "csd-0", csd, 2);
+        // Create Opus decoder
+        int error;
+        decoder = opus_decoder_create(SAMPLE_RATE, CHANNELS, &error);
+        if (error != OPUS_OK || !decoder) {
+            LOGE("AudioPlayback::start() - Failed to create Opus decoder, error=%d", error);
+            return false;
+        }
 
-        AMediaCodec_configure(decoder, format, nullptr, nullptr, 0);
-        AMediaFormat_delete(format);
-        AMediaCodec_start(decoder);
+        LOGD("AudioPlayback::start() - Opus decoder created successfully");
 
+        // Create Oboe audio stream
         AudioStreamBuilder builder;
-        builder.setDirection(Direction::Output)
+        Result result = builder.setDirection(Direction::Output)
                ->setPerformanceMode(PerformanceMode::LowLatency)
                ->setSharingMode(SharingMode::Exclusive)
                ->setFormat(AudioFormat::I16)
-               ->setChannelCount(1)
-               ->setSampleRate(48000)
+               ->setChannelCount(CHANNELS)
+               ->setSampleRate(SAMPLE_RATE)
                ->setCallback(this)
                ->openStream(stream);
 
-        if (stream) {
-            stream->requestStart();
-            isRunning = true;
-            drainThread = std::thread(&AudioPlayback::drainLoop, this);
-            return true;
+        if (result != Result::OK || !stream) {
+            LOGE("AudioPlayback::start() - Failed to open Oboe stream");
+            return false;
         }
-        return false;
+
+        result = stream->requestStart();
+        if (result != Result::OK) {
+            LOGE("AudioPlayback::start() - Failed to start Oboe stream");
+            return false;
+        }
+
+        isRunning = true;
+        decodeThread = std::thread(&AudioPlayback::decodeLoop, this);
+
+        LOGD("AudioPlayback::start() - Started playback for %s", trackKey.c_str());
+        return true;
     }
 
     void feed(uint8_t* data, size_t size) {
         if (!decoder || !isRunning) return;
-        ssize_t bufIdx = AMediaCodec_dequeueInputBuffer(decoder, 5000);
-        if (bufIdx >= 0) {
-            size_t bufSize;
-            uint8_t* buf = AMediaCodec_getInputBuffer(decoder, bufIdx, &bufSize);
-            if (size <= bufSize) {
-                memcpy(buf, data, size);
-                AMediaCodec_queueInputBuffer(decoder, bufIdx, 0, size, 0, 0);
-            }
-        } else {
-            LOGW("Audio playback input overflow for %s", trackKey.c_str());
+
+        std::vector<uint8_t> opusData(data, data + size);
+        if (!opusQueue.push(opusData)) {
+            LOGW("AudioPlayback::feed() - Opus queue full for %s", trackKey.c_str());
         }
     }
 
     DataCallbackResult onAudioReady(AudioStream *oboeStream, void *audioData, int32_t numFrames) override {
         if (!isRunning) return DataCallbackResult::Stop;
 
+        int16_t* output = static_cast<int16_t*>(audioData);
         size_t bytesNeeded = numFrames * sizeof(int16_t);
+
         std::lock_guard<std::mutex> lock(bufferMutex);
         if (pcmBuffer.size() >= bytesNeeded) {
-            memcpy(audioData, pcmBuffer.data(), bytesNeeded);
+            memcpy(output, pcmBuffer.data(), bytesNeeded);
             pcmBuffer.erase(pcmBuffer.begin(), pcmBuffer.begin() + bytesNeeded);
         } else {
+            // Underrun - fill with available data + silence
             size_t available = pcmBuffer.size();
             if (available > 0) {
-                memcpy(audioData, pcmBuffer.data(), available);
+                memcpy(output, pcmBuffer.data(), available);
                 pcmBuffer.clear();
             }
-            memset((uint8_t*)audioData + available, 0, bytesNeeded - available);
+            memset((uint8_t*)output + available, 0, bytesNeeded - available);
         }
+
         return DataCallbackResult::Continue;
     }
 
 private:
     std::string trackKey;
     std::shared_ptr<AudioStream> stream;
-    AMediaCodec* decoder = nullptr;
+    OpusDecoder* decoder = nullptr;
     std::vector<uint8_t> pcmBuffer;
     std::mutex bufferMutex;
-    std::thread drainThread;
+    std::thread decodeThread;
     std::atomic<bool> isRunning{false};
 
-    void drainLoop() {
+    LockFreeQueue<std::vector<uint8_t>, QUEUE_CAPACITY> opusQueue;
+
+    void decodeLoop() {
+        std::vector<uint8_t> opusData;
+        std::vector<int16_t> pcmData(FRAME_SIZE);
+
         while (isRunning) {
-            if (!decoder) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                continue;
-            }
-            AMediaCodecBufferInfo info;
-            ssize_t outIdx = AMediaCodec_dequeueOutputBuffer(decoder, &info, 1000);
-            if (outIdx >= 0) {
-                uint8_t* outBuf = AMediaCodec_getOutputBuffer(decoder, outIdx, nullptr);
-                if (outBuf && info.size > 0) {
-                    std::lock_guard<std::mutex> lock(bufferMutex);
-                    if (pcmBuffer.size() < 48000 * sizeof(int16_t)) { // Cap at 1s
-                        pcmBuffer.insert(pcmBuffer.end(), outBuf + info.offset, outBuf + info.offset + info.size);
-                    }
+            if (opusQueue.pop(opusData)) {
+                // Decode with Opus
+                int decodedSamples = opus_decode(decoder, opusData.data(), opusData.size(),
+                                                pcmData.data(), FRAME_SIZE, 0);
+
+                if (decodedSamples < 0) {
+                    LOGE("AudioPlayback::decodeLoop() - Opus decode error: %d", decodedSamples);
+                    continue;
                 }
-                AMediaCodec_releaseOutputBuffer(decoder, outIdx, false);
-            } else if (outIdx == AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
+
+                // Add decoded PCM to playback buffer
+                std::lock_guard<std::mutex> lock(bufferMutex);
+                size_t bytesToAdd = decodedSamples * sizeof(int16_t);
+                if (pcmBuffer.size() < SAMPLE_RATE * sizeof(int16_t)) { // Cap at 1s
+                    pcmBuffer.insert(pcmBuffer.end(),
+                                   (uint8_t*)pcmData.data(),
+                                   (uint8_t*)pcmData.data() + bytesToAdd);
+                }
+            } else {
+                // Queue empty, sleep briefly
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         }
@@ -305,7 +333,7 @@ std::mutex gPlaybackMutex;
 extern "C" {
     JNIEXPORT jstring JNICALL
     Java_com_cisco_nativeaudio_NativeAudioLib_stringFromJNI(JNIEnv* env, jobject) {
-        return env->NewStringUTF("Oboe Native Audio Ready");
+        return env->NewStringUTF("Oboe Native Audio with Opus Ready");
     }
 
     JNIEXPORT jboolean JNICALL

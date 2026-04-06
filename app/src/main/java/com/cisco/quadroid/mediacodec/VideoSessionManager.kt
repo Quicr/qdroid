@@ -134,10 +134,10 @@ class VideoSessionManager @Inject constructor(
         }
 
         // Subscribe to meeting namespace to discover all participants
-        Log.i(tag, "Subscribing to namespace: $localPrefix")
-        moqTransport.subscribeNamespace(localPrefix, object : NamespaceSubscriptionCallback {
+        Log.i(tag, "Subscribing to namespace: $remoteNamespace")
+        moqTransport.subscribeNamespace(remoteNamespace, object : NamespaceSubscriptionCallback {
             override fun onMatch(trackName: String): Boolean {
-                if (trackName == remoteVideoTrackName || trackName == remoteAudioTrackName) {
+                if (trackName == localVideoTrackName || trackName == localAudioTrackName) {
                     Log.d(tag, "Ignoring own track: $trackName")
                     return false
                 }
@@ -165,15 +165,8 @@ class VideoSessionManager @Inject constructor(
                             }
                             addRemoteParticipant(trackKey)
                         } else if (trackName.contains("audio")) {
-                            if (objectId == 0L) {
-                                // Log codec config for debugging
-                                val bytes = ByteArray(payload.remaining())
-                                payload.duplicate().get(bytes)
-                                val hexString = bytes.joinToString(" ") { "%02X".format(it) }
-                                Log.i(tag, "Received codec config (object 0) for $trackName in group $groupId, size=${bytes.size}, data=[$hexString]")
-                            } else {
-                                nativeAudioLib.feedDecoder(trackKey, payload, payload.remaining())
-                            }
+                            // Opus packets are self-contained, no codec config needed
+                            nativeAudioLib.feedDecoder(trackKey, payload, payload.remaining())
                         }
                     }
                 }
@@ -184,12 +177,12 @@ class VideoSessionManager @Inject constructor(
 
 
         // Publish our tracks
-        Log.i(tag, "Publishing tracks: $remoteVideoTrackName, $remoteAudioTrackName")
-        moqTransport.publish(remoteVideoTrackName)
-        videoFramer = MoqMediaFramer(moqTransport, remoteVideoTrackName)
+        Log.i(tag, "Publishing tracks: $localAudioTrackName, $localVideoTrackName")
+        moqTransport.publish(localVideoTrackName)
+        videoFramer = MoqMediaFramer(moqTransport, localVideoTrackName)
 
-        moqTransport.publish(remoteAudioTrackName)
-        audioFramer = MoqAudioFramer(moqTransport, remoteAudioTrackName)
+        moqTransport.publish(localAudioTrackName)
+        audioFramer = MoqAudioFramer(moqTransport, localAudioTrackName)
 
         setupEncoder()
         setupCamera(lifecycleOwner)
@@ -346,10 +339,10 @@ class VideoSessionManager @Inject constructor(
     @Synchronized
     fun stopSession() {
         //Unpublish self tracks
-        moqTransport.unpublishTrack(remoteVideoTrackName)
-        moqTransport.unpublishTrack(remoteAudioTrackName)
+        moqTransport.unpublishTrack(localVideoTrackName)
+        moqTransport.unpublishTrack(localAudioTrackName)
         //Unsubscribe namespace
-        moqTransport.unsubscribeNamespace(localPrefix)
+        moqTransport.unsubscribeNamespace(remoteNamespace)
         cleanup()
     }
 

@@ -11,6 +11,22 @@ project("nativeaudio")
 # Include oboe
 add_subdirectory(oboe)
 
+# Fetch and build Opus
+include(FetchContent)
+FetchContent_Declare(
+    opus
+    GIT_REPOSITORY https://github.com/xiph/opus.git
+    GIT_TAG        v1.4
+    GIT_SHALLOW    TRUE
+)
+
+set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "Don't build Opus programs")
+set(OPUS_BUILD_TESTING OFF CACHE BOOL "Don't build Opus tests")
+set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "Don't install pkg-config")
+set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "Don't install CMake config")
+
+FetchContent_MakeAvailable(opus)
+
 # Creates and names a library, sets it as either STATIC
 # or SHARED, and provides the relative paths to its source code.
 add_library(${CMAKE_PROJECT_NAME} SHARED
@@ -23,7 +39,9 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     android
     oboe
     log
-    mediandk)
+    opus)
 
 # Add oboe's include directory to our search path
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE oboe/include)
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+    oboe/include
+    ${opus_SOURCE_DIR}/include)
