@@ -81,7 +81,7 @@ fun NativeVideoRenderer(
             },
             modifier = Modifier.fillMaxSize(),
             onRelease = {
-                viewModel.removeVideoFrameListener(trackKey)
+                //viewModel.removeVideoFrameListener(trackKey)
             }
         )
     }

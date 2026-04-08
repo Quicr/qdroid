@@ -1,6 +1,5 @@
 package com.cisco.quadroid.mediacodec
 
-import android.annotation.SuppressLint
 import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
@@ -90,12 +89,13 @@ class VideoSessionManager @Inject constructor(
     // Meeting Configuration
     private val meetingId = "meeting123"
     private val userName = "alice"
+    private val userId = "carlos"
     private val localPrefix = "webex.com/$meetingId/$userName"
     private val meetingNamespace = "webex.com/$meetingId"
 
     private val localVideoTrackName = "$localPrefix/video"
     private val localAudioTrackName = "$localPrefix/audio"
-    private val remoteNamespace = "$meetingNamespace/bob"
+    private val remoteNamespace = "$meetingNamespace/diana"
     private val remoteVideoTrackName = "$remoteNamespace/video"
     private val remoteAudioTrackName = "$remoteNamespace/audio"
     
@@ -134,10 +134,10 @@ class VideoSessionManager @Inject constructor(
         }
 
         // Subscribe to meeting namespace to discover all participants
-        Log.i(tag, "Subscribing to namespace: $localPrefix")
-        moqTransport.subscribeNamespace(localPrefix, object : NamespaceSubscriptionCallback {
+        Log.i(tag, "Subscribing to namespace: $meetingNamespace")
+        moqTransport.subscribeNamespace(meetingNamespace, object : NamespaceSubscriptionCallback {
             override fun onMatch(trackName: String): Boolean {
-                if (trackName == remoteVideoTrackName || trackName == remoteAudioTrackName) {
+                if (trackName == localVideoTrackName || trackName == localAudioTrackName) {
                     Log.d(tag, "Ignoring own track: $trackName")
                     return false
                 }
@@ -152,6 +152,10 @@ class VideoSessionManager @Inject constructor(
 
                 moqTransport.trackCallbacks[trackKey] = object : MoqObjectCallback {
                     override fun onObject(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer) {
+                        if (trackName == localVideoTrackName || trackName == localAudioTrackName) {
+                            Log.d(tag, "Ignoring own track: $trackName")
+                            return
+                        }
                         if (trackName.contains("video")) {
                             val listener = videoFrameListeners[trackKey]
                             if (listener != null) {
@@ -159,7 +163,7 @@ class VideoSessionManager @Inject constructor(
                                 payload.get(bytes)
                                 listener(bytes, System.nanoTime() / 1000)
                             } else {
-                                if (objectId % 100 == 0L) {
+                                if (objectId > 50 && objectId % 100 == 0L) {
                                     Log.w(tag, "No video listener for track $trackKey (trackName=$trackName)")
                                 }
                             }
@@ -177,12 +181,12 @@ class VideoSessionManager @Inject constructor(
 
 
         // Publish our tracks
-        Log.i(tag, "Publishing tracks: $remoteAudioTrackName, $remoteVideoTrackName")
-        moqTransport.publish(remoteVideoTrackName)
-        videoFramer = MoqMediaFramer(moqTransport, remoteVideoTrackName)
+        Log.i(tag, "Publishing tracks: $localVideoTrackName, $localAudioTrackName")
+        moqTransport.publish(localVideoTrackName)
+        videoFramer = MoqMediaFramer(moqTransport, localVideoTrackName)
 
-        moqTransport.publish(remoteAudioTrackName)
-        audioFramer = MoqAudioFramer(moqTransport, remoteAudioTrackName)
+        moqTransport.publish(localAudioTrackName)
+        audioFramer = MoqAudioFramer(moqTransport, localAudioTrackName)
 
         setupEncoder()
         setupCamera(lifecycleOwner)
@@ -339,10 +343,10 @@ class VideoSessionManager @Inject constructor(
     @Synchronized
     fun stopSession() {
         //Unpublish self tracks
-        moqTransport.unpublishTrack(remoteVideoTrackName)
-        moqTransport.unpublishTrack(remoteAudioTrackName)
+        moqTransport.unpublishTrack(localVideoTrackName)
+        moqTransport.unpublishTrack(localAudioTrackName)
         //Unsubscribe namespace
-        moqTransport.unsubscribeNamespace(localPrefix)
+        moqTransport.unsubscribeNamespace(meetingNamespace)
         cleanup()
     }
 

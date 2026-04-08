@@ -85,7 +85,7 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
     }
 
     override fun publishNamespace(namespacePrefix: String) {
-        if (nativePtr != 0L) nativePublishNamespace(nativePtr, namespacePrefix)
+        /*if (nativePtr != 0L) nativePublishNamespace(nativePtr, namespacePrefix)*/
     }
 
     override fun publish(trackName: String, options: PublishOptions) {

@@ -19,9 +19,9 @@
 using namespace oboe;
 
 // Opus configuration matching ptt audio_engine.cpp
-constexpr int SAMPLE_RATE = 16000;
+constexpr int SAMPLE_RATE = 48000;
 constexpr int CHANNELS = 1;
-constexpr int FRAME_SIZE = 320; // 20ms at 16kHz
+constexpr int FRAME_SIZE = 960; //320; // 20ms at 16kHz
 constexpr int MAX_PACKET_SIZE = 4000;
 constexpr int BITRATE = 16000;
 constexpr int PCM_BUFFER_SIZE = FRAME_SIZE * CHANNELS * sizeof(int16_t);

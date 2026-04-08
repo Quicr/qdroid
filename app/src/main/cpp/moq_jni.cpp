@@ -169,7 +169,7 @@ public:
       : quicr::SubscribeTrackHandler(full_track_name,
                                       128, // priority
                                       quicr::messages::GroupOrder::kAscending,
-                                      quicr::messages::FilterType::kLargestObject,
+                                      std::monostate{}, // no filter (latest objects)
                                       std::nullopt, // no joining fetch
                                       false) // not publisher-initiated
       , callback_ref_(callback_ref)
@@ -177,7 +177,8 @@ public:
         LOGI("Created AndroidSubscribeTrackHandler");
     }
 
-    void ObjectReceived(const quicr::ObjectHeaders& hdr, quicr::BytesSpan data) override
+    void ObjectReceived(const quicr::ObjectHeaders& hdr, quicr::BytesSpan data,
+                       std::optional<quicr::messages::StreamHeaderProperties> = std::nullopt) override
     {
         LOGI("ObjectReceived: group_id=%llu object_id=%llu payload_length=%llu",
              hdr.group_id, hdr.object_id, hdr.payload_length);
