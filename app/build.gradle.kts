@@ -8,16 +8,23 @@ plugins {
 
 android {
     namespace = "com.cisco.quadroid"
-    compileSdk = 36
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.cisco.quadroid"
-        minSdk = 26
-        targetSdk = 36
+        minSdk = 30
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        
+        externalNativeBuild {
+            cmake {
+                cppFlags("-std=c++20")
+                arguments("-DANDROID_STL=c++_shared")
+            }
+        }
     }
 
     buildTypes {
@@ -38,6 +45,12 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 }
 
@@ -61,14 +74,25 @@ dependencies {
     ksp(libs.hilt.compiler)
     implementation(libs.androidx.hilt.navigation.compose)
 
-    // WebRTC
-    implementation(libs.webrtc.android)
-
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)
 
     // Permissions
     implementation(libs.accompanist.permissions)
+
+    // CameraX
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.compose)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.androidx.camera.video)
+    
+    // Concurrency
+    implementation(libs.androidx.concurrent.futures.ktx)
+
+    // native submodule
+    implementation(project(":nativeaudio"))
 
     // Testing
     testImplementation(libs.junit)

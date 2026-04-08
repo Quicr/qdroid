@@ -10,7 +10,6 @@ import io.mockk.mockk
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Rule
 import org.junit.Test
-import org.webrtc.VideoTrack
 
 class MainScreenTest {
 
@@ -22,8 +21,7 @@ class MainScreenTest {
     @Test
     fun lobbyState_showsStartCallButton() {
         every { viewModel.uiState } returns MutableStateFlow(CallUiState.Lobby)
-        every { viewModel.localVideoTrack } returns MutableStateFlow(null)
-        every { viewModel.remoteVideoTrack } returns MutableStateFlow(null)
+
 
         composeTestRule.setContent {
             QuadroidTheme {
@@ -38,8 +36,7 @@ class MainScreenTest {
     @Test
     fun inCallState_showsEndCallButton() {
         every { viewModel.uiState } returns MutableStateFlow(CallUiState.InCall)
-        every { viewModel.localVideoTrack } returns MutableStateFlow(null)
-        every { viewModel.remoteVideoTrack } returns MutableStateFlow(null)
+
 
         composeTestRule.setContent {
             QuadroidTheme {
