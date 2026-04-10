@@ -94,6 +94,9 @@ dependencies {
     // native submodule
     implementation(project(":nativeaudio"))
 
+    // moqcatalog submodule
+    implementation(project(":moqcatalog"))
+
     // Testing
     testImplementation(libs.junit)
     testImplementation(libs.mockk)

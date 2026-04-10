@@ -43,6 +43,8 @@ class MainViewModel @Inject constructor(
 
     val connectionStatus: StateFlow<MoqConnectionStatus> = videoSessionManager.connectionStatus
 
+    val isCatalogReady: StateFlow<Boolean> = videoSessionManager.isCatalogReady
+
     fun connectToRelay() {
         if (relay_url != last_connected_url || videoSessionManager.connectionStatus.value == MoqConnectionStatus.DISCONNECTED || videoSessionManager.connectionStatus.value == MoqConnectionStatus.IDLE) {
             videoSessionManager.connectToRelay(relay_url)

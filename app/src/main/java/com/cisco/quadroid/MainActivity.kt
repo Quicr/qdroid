@@ -173,6 +173,7 @@ fun MainScreen(viewModel: MainViewModel) {
     val isFrontCamera by viewModel.isFrontCamera.collectAsStateWithLifecycle()
     val videoAspectRatio by viewModel.videoAspectRatio.collectAsStateWithLifecycle()
     val connectionStatus by viewModel.connectionStatus.collectAsStateWithLifecycle()
+    val isCatalogReady by viewModel.isCatalogReady.collectAsStateWithLifecycle()
 
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
@@ -212,6 +213,7 @@ fun MainScreen(viewModel: MainViewModel) {
                 is CallUiState.Lobby -> {
                     LobbyScreen(
                         connectionStatus = connectionStatus,
+                        isCatalogReady = isCatalogReady,
                         onStartCall = {
                             if (permissionsState.allPermissionsGranted) {
                                 val rotation = context.display?.rotation ?: 0
@@ -402,11 +404,13 @@ fun LiquidGlassButton(
 @Composable
 fun LobbyScreen(
     connectionStatus: MoqConnectionStatus,
+    isCatalogReady: Boolean,
     onStartCall: () -> Unit,
     onNavigateToSettings: () -> Unit
 ) {
     val isConnected = connectionStatus == MoqConnectionStatus.CONNECTED
     val isConnecting = connectionStatus == MoqConnectionStatus.CONNECTING || connectionStatus == MoqConnectionStatus.IDLE
+    val canJoinMeeting = isConnected && isCatalogReady
 
     Box(
         modifier = Modifier
@@ -460,7 +464,7 @@ fun LobbyScreen(
             // 1, 4 & 5. Liquid Glass Button: Material You, Minimalistic
             LiquidGlassButton(
                 onClick = onStartCall,
-                enabled = isConnected,
+                enabled = canJoinMeeting,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(
@@ -477,7 +481,7 @@ fun LobbyScreen(
             }
 
             // Revolving progress bar below button
-            if (!isConnected) {
+            if (!canJoinMeeting) {
                 Spacer(modifier = Modifier.height(32.dp))
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(
@@ -487,7 +491,12 @@ fun LobbyScreen(
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
-                        text = if (isConnecting) "Connecting to MoQ Relay..." else "Connection failed. Retrying...",
+                        text = when {
+                            !isConnected && isConnecting -> "Connecting to MoQ Relay..."
+                            !isConnected -> "Connection failed. Retrying..."
+                            isConnected && !isCatalogReady -> "Loading catalog..."
+                            else -> "Preparing..."
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                     )

@@ -16,6 +16,10 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import com.cisco.catalog.CatalogUpdateResult
+import com.cisco.catalog.MoqCatalog
+import com.cisco.catalog.MoqNameUtils
+import com.cisco.catalog.MsfTrack
 import com.cisco.nativeaudio.NativeAudioLib
 import com.cisco.quadroid.transport.MoqAudioFramer
 import com.cisco.quadroid.transport.MoqConnectionStatus
@@ -30,11 +34,16 @@ import com.cisco.quadroid.transport.VideoJitterBufferCallback
 import com.cisco.quadroid.util.DeviceIdentifier
 import com.cisco.quadroid.util.TrackUtil
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -47,6 +56,9 @@ class VideoSessionManager @Inject constructor(
     private val moqTransport: MoqTransport
 ) {
     private val tag = "VideoSessionManager"
+
+    // Coroutine scope for observing connection status
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     // Video Config
     private val videoMimeType = MediaFormat.MIMETYPE_VIDEO_AVC
@@ -85,17 +97,30 @@ class VideoSessionManager @Inject constructor(
 
     private val _remoteParticipants = MutableStateFlow<List<ParticipantStream>>(emptyList())
     val remoteParticipants: StateFlow<List<ParticipantStream>> = _remoteParticipants.asStateFlow()
-    
+
     private val _videoAspectRatio = MutableStateFlow(height.toFloat() / width.toFloat())
     val videoAspectRatio: StateFlow<Float> = _videoAspectRatio.asStateFlow()
 
     private var localPreviewSurface: Surface? = null
-    
+
     private var videoFramer: MoqMediaFramer? = null
     private var audioFramer: MoqAudioFramer? = null
-    
+
+    // Catalog state management
+    private val moqCatalog = MoqCatalog()
+    private val _isCatalogReady = MutableStateFlow(false)
+    val isCatalogReady: StateFlow<Boolean> = _isCatalogReady.asStateFlow()
+
+    private var catalogVersion: Int = 0
+    private val catalogTracks = mutableListOf<MsfTrack>()
+    private val catalogTrackNamesUrl = mutableListOf<String>()
+    private val catalogNamespacesUrl = mutableListOf<String>()
+    private var catalogSubscribed = false
+
     // Meeting Configuration
     private val meetingId = "meeting123"
+
+    private val publisherId: String = "0XCA1A109" // Publisher ID for catalog subscription
     private val meetingNamespace = "webex.com/$meetingId"
 
     // Each device publishes under its own unique device ID
@@ -108,8 +133,25 @@ class VideoSessionManager @Inject constructor(
     private val remoteNamespace = "$meetingNamespace/bob"
     private val remoteVideoTrackName = "$remoteNamespace/video"
     private val remoteAudioTrackName = "$remoteNamespace/audio"
-    
+
     val connectionStatus: StateFlow<MoqConnectionStatus> = moqTransport.connectionStatus
+
+    init {
+        // Observe connection status and subscribe to catalog when connected
+        scope.launch {
+            connectionStatus.collect { status ->
+                Log.d(tag, "Connection status changed to: $status")
+                if (status == MoqConnectionStatus.CONNECTED && !catalogSubscribed) {
+                    Log.i(tag, "Connection established, subscribing to catalog track")
+                    subscribeToCatalogTrack()
+                    catalogSubscribed = true
+                } else if (status == MoqConnectionStatus.DISCONNECTED || status == MoqConnectionStatus.ERROR) {
+                    // Reset catalog subscription flag on disconnect
+                    catalogSubscribed = false
+                }
+            }
+        }
+    }
 
     fun connectToRelay(url: String) {
         moqTransport.connect(url, deviceId)
@@ -183,6 +225,149 @@ class VideoSessionManager @Inject constructor(
             }
         }
     }
+
+    private fun subscribeToCatalogTrack() {
+        // Build catalog track name in safe form: cisco.2ewebex.2ecom-nab-v1-publisher_<id>--catalog
+        val catalogTrackSafeForm =
+            "cisco.2ewebex.2ecom-nab-v1-catalog-publisher_${publisherId}--catalog"
+
+        // Convert from safe form to URL format
+        val catalogTrackUrl = MoqNameUtils.safeFormToUrl(catalogTrackSafeForm)
+
+        Log.i(
+            tag,
+            "Subscribing to catalog track: $catalogTrackUrl (safe form: $catalogTrackSafeForm)"
+        )
+
+        // Generate track key for the catalog track
+        val catalogTrackKey = TrackUtil.generateTrackKeyFromFullName(catalogTrackUrl)
+
+        moqTransport.trackCallbacks[catalogTrackKey] = object : MoqObjectCallback {
+            override fun onObject(
+                trackName: String,
+                groupId: Long,
+                objectId: Long,
+                payload: ByteBuffer
+            ) {
+                Log.d(
+                    tag,
+                    "Received catalog object: trackName=$trackName, groupId=$groupId, objectId=$objectId, size=${payload.remaining()}"
+                )
+
+                // Parse the JSON payload
+                val bytes = ByteArray(payload.remaining())
+                payload.get(bytes)
+                val jsonString = String(bytes, StandardCharsets.UTF_8)
+
+                Log.d(tag, "Catalog JSON: $jsonString")
+
+                // Update catalog with the JSON
+                val updateResult = moqCatalog.updateCatalog(jsonString)
+
+                if (updateResult.isSuccess) {
+                    val result = updateResult.getOrNull()!!
+                    handleCatalogUpdate(result)
+                } else {
+                    Log.e(
+                        tag,
+                        "Failed to parse catalog: ${updateResult.exceptionOrNull()?.message}"
+                    )
+                }
+            }
+        }
+
+        // Subscribe to the catalog track
+        moqTransport.subscribe(catalogTrackUrl, callback = object : MoqObjectCallback {
+            override fun onObject(
+                trackName: String,
+                groupId: Long,
+                objectId: Long,
+                payload: ByteBuffer
+            ) {
+                Log.d(
+                    tag,
+                    "Received catalog object: trackName=$trackName, groupId=$groupId, objectId=$objectId, size=${payload.remaining()}"
+                )
+
+                // Parse the JSON payload
+                val bytes = ByteArray(payload.remaining())
+                payload.get(bytes)
+                val jsonString = String(bytes, StandardCharsets.UTF_8)
+
+                Log.d(tag, "Catalog JSON: $jsonString")
+
+                // Update catalog with the JSON
+                val updateResult = moqCatalog.updateCatalog(jsonString)
+
+                if (updateResult.isSuccess) {
+                    val result = updateResult.getOrNull()!!
+                    handleCatalogUpdate(result)
+                } else {
+                    Log.e(
+                        tag,
+                        "Failed to parse catalog: ${updateResult.exceptionOrNull()?.message}"
+                    )
+                }
+            }
+        })
+    }
+
+                private fun handleCatalogUpdate(result: CatalogUpdateResult) {
+            Log.i(tag, "Catalog updated: version=${result.version}, tracks=${result.totalTracks}, " +
+                    "added=${result.tracksAdded}, removed=${result.tracksRemoved}, " +
+                    "refreshed=${result.refreshed}, isDelta=${result.isDelta}")
+
+            // Check if version changed
+            val versionChanged = catalogVersion != result.version
+            catalogVersion = result.version
+
+            if (versionChanged || result.refreshed) {
+                // Update catalog tracks and namespaces
+                updateCatalogTracksAndNamespaces()
+            }
+
+            // Mark catalog as ready
+            if (!_isCatalogReady.value) {
+                _isCatalogReady.value = true
+                Log.i(tag, "Catalog is now ready")
+            }
+        }
+
+                private fun updateCatalogTracksAndNamespaces() {
+            val tracks = moqCatalog.getTracks()
+
+            // Clear existing lists
+            catalogTracks.clear()
+            catalogTrackNamesUrl.clear()
+            catalogNamespacesUrl.clear()
+
+            // Collect unique namespaces
+            val namespacesSet = mutableSetOf<String>()
+
+            // Process tracks
+            tracks.forEach { track ->
+                catalogTracks.add(track)
+
+                // Build track name in URL format
+                val namespace = track.namespace
+                val trackName = track.name
+
+                if (namespace != null) {
+                    val trackFullNameUrl = "$namespace/$trackName"
+                    catalogTrackNamesUrl.add(trackFullNameUrl)
+                    namespacesSet.add(namespace)
+                } else {
+                    catalogTrackNamesUrl.add(trackName)
+                }
+
+                Log.d(tag, "Catalog track: $trackName, namespace: $namespace, codec: ${track.codec}, role: ${track.role}")
+            }
+
+            // Store namespaces
+            catalogNamespacesUrl.addAll(namespacesSet)
+
+            Log.i(tag, "Updated catalog: ${catalogTracks.size} tracks, ${catalogNamespacesUrl.size} namespaces")
+        }
 
     fun addVideoFrameListener(trackKey: String, listener: (ByteArray, Long) -> Unit) {
         Log.d(tag, "addVideoFrameListener for $trackKey")
@@ -602,9 +787,20 @@ class VideoSessionManager @Inject constructor(
         videoFramer = null
         audioFramer = null
         videoFrameListeners.clear()
-        // DON'T clear trackKeyToFullName - it must persist across session stop/start cycles
-        // for rejoin scenarios. Without this mapping, we can't recreate jitter buffers.
-        // trackKeyToFullName.clear()
+
+        trackKeyToFullName.clear()
+
+    }
+
+    fun resetCatalog() {
+        // Clear catalog state
+        _isCatalogReady.value = false
+        catalogVersion = 0
+        catalogTracks.clear()
+        catalogTrackNamesUrl.clear()
+        catalogNamespacesUrl.clear()
+        moqCatalog.clear()
+        // Note: catalogSubscribed is managed by connection status observer
     }
 }
 
