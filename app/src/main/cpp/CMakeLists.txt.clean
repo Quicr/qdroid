@@ -1,0 +1,50 @@
+cmake_minimum_required(VERSION 3.22.1)
+
+project("moq_jni")
+
+# Enable FetchContent for libquicr and dependencies
+include(FetchContent)
+
+set(CRYPTO "BORINGSSL" CACHE STRING "Crypto backend " FORCE)
+
+# BoringSSL support (boring2 branch)
+# Option 1: Use your fixed fork
+# FetchContent_Declare(
+#     libquicr
+#     GIT_REPOSITORY https://github.com/YOUR_USERNAME/libquicr.git
+#     GIT_TAG        boring2
+#     GIT_SUBMODULES_RECURSE TRUE
+# )
+
+# Option 2: Use upstream after patches are merged
+# FetchContent_Declare(
+#     libquicr
+#     GIT_REPOSITORY https://github.com/Quicr/libquicr.git
+#     GIT_TAG        boring2
+#     GIT_SUBMODULES_RECURSE TRUE
+# )
+
+# Option 3: Pin to a specific commit (recommended for stability)
+FetchContent_Declare(
+    libquicr
+    GIT_REPOSITORY https://github.com/YOUR_USERNAME/libquicr.git
+    GIT_TAG        abc123def456  # Replace with your commit hash after applying patches
+    GIT_SUBMODULES_RECURSE TRUE
+)
+
+FetchContent_MakeAvailable(libquicr)
+
+add_library(moq_jni SHARED
+    moq_jni.cpp
+)
+
+target_link_libraries(moq_jni
+    quicr
+    android
+    log
+)
+
+target_include_directories(moq_jni PRIVATE
+    ${libquicr_SOURCE_DIR}/include
+    ${libquicr_SOURCE_DIR}/src
+)

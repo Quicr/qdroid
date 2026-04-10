@@ -167,4 +167,9 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
     private external fun nativeUnpublishNamespace(ptr: Long, namespacePrefix: String)
     private external fun nativeUnsubscribeNamespace(ptr: Long, namespacePrefix: String)
     private external fun nativeSetNamespaceDefaultBehavior(ptr: Long, acceptAll: Boolean)
+
+    // Video jitter buffer methods
+    external fun nativeCreateVideoJitterBuffer(trackName: String, callback: VideoJitterBufferCallback)
+    external fun nativeDestroyVideoJitterBuffer(trackName: String)
+    external fun nativeGetVideoJitterBufferStats(trackName: String): VideoJitterBufferStats?
 }

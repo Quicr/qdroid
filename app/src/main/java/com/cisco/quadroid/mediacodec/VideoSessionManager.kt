@@ -20,9 +20,12 @@ import com.cisco.nativeaudio.NativeAudioLib
 import com.cisco.quadroid.transport.MoqAudioFramer
 import com.cisco.quadroid.transport.MoqConnectionStatus
 import com.cisco.quadroid.transport.MoqMediaFramer
+import com.cisco.quadroid.transport.MoqNative
 import com.cisco.quadroid.transport.MoqObjectCallback
 import com.cisco.quadroid.transport.MoqTransport
 import com.cisco.quadroid.transport.NamespaceSubscriptionCallback
+import com.cisco.quadroid.transport.VideoFrame
+import com.cisco.quadroid.transport.VideoJitterBufferCallback
 import com.cisco.quadroid.util.DeviceIdentifier
 import com.cisco.quadroid.util.TrackUtil
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -68,6 +71,10 @@ class VideoSessionManager @Inject constructor(
     private val encoderThread = HandlerThread("VideoSessionManager_Encoder").apply { start() }
     private val encoderHandler = Handler(encoderThread.looper)
 
+    // Monitoring for jitter buffer statistics
+    private val monitoringHandler = Handler(android.os.Looper.getMainLooper())
+    private var isMonitoring = false
+
     @Volatile
     private var encoderOutputFormat: MediaFormat? = null
     private var formatLatch = CountDownLatch(1)
@@ -95,7 +102,7 @@ class VideoSessionManager @Inject constructor(
 
     private val localVideoTrackName = "$localPrefix/video"
     private val localAudioTrackName = "$localPrefix/audio"
-    private val remoteNamespace = "$meetingNamespace/diana"
+    private val remoteNamespace = "$meetingNamespace/bob"
     private val remoteVideoTrackName = "$remoteNamespace/video"
     private val remoteAudioTrackName = "$remoteNamespace/audio"
     
@@ -110,14 +117,114 @@ class VideoSessionManager @Inject constructor(
         moqTransport.disconnect()
     }
 
+    // Store mapping from trackKey to full track name for jitter buffer lookup
+    private val trackKeyToFullName = mutableMapOf<String, String>()
+
+    // Monitoring runnable for periodic jitter buffer statistics
+    private val monitoringRunnable = object : Runnable {
+        override fun run() {
+            if (!isMonitoring) return
+
+            val moqNative = moqTransport as? MoqNative
+            if (moqNative != null) {
+                videoFrameListeners.keys.forEach { trackKey ->
+                    val fullTrackName = trackKeyToFullName[trackKey]
+                    if (fullTrackName != null) {
+                        val stats = moqNative.nativeGetVideoJitterBufferStats(fullTrackName)
+                        if (stats != null) {
+                            // Log warning if frame drop rate is significant
+                            if (stats.framesDropped > 0) {
+                                Log.w(tag, "Buffer [$trackKey]: recv=${stats.framesReceived}, " +
+                                    "out=${stats.framesOutput}, drop=${stats.framesDropped} " +
+                                    "(${String.format("%.1f", stats.dropRatePercent)}%), " +
+                                    "avgLat=${String.format("%.1f", stats.avgLatencyMs)}ms, " +
+                                    "maxLat=${String.format("%.1f", stats.maxLatencyMs)}ms")
+                            }
+                            // Log info periodically even if no drops
+                            else if (stats.framesOutput > 0) {
+                                Log.i(tag, "Buffer [$trackKey]: recv=${stats.framesReceived}, " +
+                                    "out=${stats.framesOutput}, " +
+                                    "avgLat=${String.format("%.1f", stats.avgLatencyMs)}ms")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Schedule next check in 5 seconds
+            if (isMonitoring) {
+                monitoringHandler.postDelayed(this, 5000)
+            }
+        }
+    }
+
     fun addVideoFrameListener(trackKey: String, listener: (ByteArray, Long) -> Unit) {
         Log.d(tag, "addVideoFrameListener for $trackKey")
         videoFrameListeners[trackKey] = listener
+
+        // Create native jitter buffer for this track using full track name
+        val moqNative = moqTransport as? MoqNative
+        if (moqNative != null) {
+            // Get full track name for jitter buffer lookup in C++
+            val fullTrackName = trackKeyToFullName[trackKey]
+            if (fullTrackName == null) {
+                Log.w(tag, "No full track name found for trackKey $trackKey, jitter buffer not created")
+                return
+            }
+
+            val callback = object : VideoJitterBufferCallback {
+                override fun onFramesReady(trackName: String, frames: Array<VideoFrame>) {
+                    val frameListener = videoFrameListeners[trackKey] ?: return
+
+                    for (frame in frames) {
+                        // Pass frames to decoder
+                        // shouldRender flag is informational - we pass all frames to maintain decoder state
+                        frameListener(frame.data, frame.ptsUs)
+                    }
+
+                    // Log periodically for monitoring
+                    if (frames.isNotEmpty() && frames[0].objectId % 100 == 0L) {
+                        Log.v(tag, "[$trackKey] Delivered ${frames.size} frames from jitter buffer")
+                    }
+                }
+            }
+
+            // Use full track name (not hashed key) for C++ jitter buffer lookup
+            moqNative.nativeCreateVideoJitterBuffer(fullTrackName, callback)
+            Log.i(tag, "Created jitter buffer for track $trackKey (fullName: $fullTrackName)")
+        } else {
+            Log.w(tag, "MoqTransport is not MoqNative, jitter buffer not available")
+        }
     }
 
     fun removeVideoFrameListener(trackKey: String) {
         Log.d(tag, "removeVideoFrameListener for $trackKey")
+
+        // Destroy native jitter buffer using full track name
+        val moqNative = moqTransport as? MoqNative
+        val fullTrackName = trackKeyToFullName[trackKey]
+        if (fullTrackName != null) {
+            moqNative?.nativeDestroyVideoJitterBuffer(fullTrackName)
+            trackKeyToFullName.remove(trackKey)
+        }
+
         videoFrameListeners.remove(trackKey)
+    }
+
+    private fun startJitterBufferMonitoring() {
+        if (!isMonitoring) {
+            isMonitoring = true
+            monitoringHandler.postDelayed(monitoringRunnable, 5000) // Start after 5 seconds
+            Log.d(tag, "Started jitter buffer monitoring")
+        }
+    }
+
+    private fun stopJitterBufferMonitoring() {
+        if (isMonitoring) {
+            isMonitoring = false
+            monitoringHandler.removeCallbacks(monitoringRunnable)
+            Log.d(tag, "Stopped jitter buffer monitoring")
+        }
     }
 
     fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String) {
@@ -145,6 +252,9 @@ class VideoSessionManager @Inject constructor(
                 Log.i(tag, "Track Discovered: $trackName")
                 val trackKey = TrackUtil.generateTrackKeyFromFullName(trackName)
 
+                // Store mapping for jitter buffer lookup in C++
+                trackKeyToFullName[trackKey] = trackName
+
                 if (trackName.contains("audio")) {
                     Log.i(tag, "Starting native audio playback for $trackName")
                     nativeAudioLib.startPlayback(trackKey)
@@ -156,17 +266,11 @@ class VideoSessionManager @Inject constructor(
                             Log.d(tag, "Ignoring own track: $trackName")
                             return
                         }
+
+                        // Video frames are now routed directly to jitter buffer in C++
+                        // This callback only handles audio
                         if (trackName.contains("video")) {
-                            val listener = videoFrameListeners[trackKey]
-                            if (listener != null) {
-                                val bytes = ByteArray(payload.remaining())
-                                payload.get(bytes)
-                                listener(bytes, System.nanoTime() / 1000)
-                            } else {
-                                if (objectId > 50 && objectId % 100 == 0L) {
-                                    Log.w(tag, "No video listener for track $trackKey (trackName=$trackName)")
-                                }
-                            }
+                            // Video routing happens in AndroidSubscribeTrackHandler::ObjectReceived() in C++
                             addRemoteParticipant(trackKey)
                         } else if (trackName.contains("audio")) {
                             // Opus packets are self-contained, no codec config needed
@@ -191,6 +295,9 @@ class VideoSessionManager @Inject constructor(
         setupEncoder()
         setupCamera(lifecycleOwner)
         startNativeAudio()
+
+        // Start periodic jitter buffer monitoring
+        startJitterBufferMonitoring()
     }
 
     private fun startNativeAudio() {
@@ -351,6 +458,9 @@ class VideoSessionManager @Inject constructor(
     }
 
     private fun cleanup() {
+        // Stop jitter buffer monitoring first
+        stopJitterBufferMonitoring()
+
         cameraProvider?.unbindAll()
 
         encoderHandler.removeCallbacksAndMessages(null)
@@ -363,6 +473,18 @@ class VideoSessionManager @Inject constructor(
 
         nativeAudioLib.stopCapture()
 
+        // Destroy all jitter buffers before clearing listeners
+        val moqNative = moqTransport as? MoqNative
+        if (moqNative != null) {
+            videoFrameListeners.keys.forEach { trackKey ->
+                val fullTrackName = trackKeyToFullName[trackKey]
+                if (fullTrackName != null) {
+                    moqNative.nativeDestroyVideoJitterBuffer(fullTrackName)
+                    Log.d(tag, "Destroyed jitter buffer for track $trackKey (fullName: $fullTrackName)")
+                }
+            }
+        }
+
         inputSurface?.release()
         inputSurface = null
         _remoteParticipants.value = emptyList()
@@ -373,6 +495,8 @@ class VideoSessionManager @Inject constructor(
         videoFramer = null
         audioFramer = null
         videoFrameListeners.clear()
+        // Don't clear trackKeyToFullName - keep mapping for potential rejoins with same tracks
+        // This prevents race conditions when UI components try to add listeners during rejoin
     }
 }
 
