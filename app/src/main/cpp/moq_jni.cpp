@@ -10,6 +10,7 @@
 #include <quicr/object.h>
 #include "moq_util.h"
 #include "video_jitter_buffer.h"
+#include "audio_jitter_buffer.h"
 
 #define LOG_TAG "MoqJni"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -216,7 +217,22 @@ public:
             // If no jitter buffer, fall through to old path (for compatibility)
         }
 
-        // Audio or fallback path: call Kotlin callback immediately
+        // Check if this is an audio track - route to jitter buffer
+        if (track_name_str.find("audio") != std::string::npos) {
+            LOGI("Audio track detected: %s", track_name_str.c_str());
+            auto& manager = AudioJitterBufferManager::getInstance();
+            if (auto* buffer = manager.getBuffer(track_name_str)) {
+                // Audio packet goes directly to jitter buffer (C++ optimization)
+                buffer->addPacket(hdr.group_id, hdr.object_id,
+                                data.data(), data.size());
+                return;  // Don't call Kotlin callback for audio
+            } else {
+                LOGW("No jitter buffer found for audio track: %s", track_name_str.c_str());
+            }
+            // If no jitter buffer, fall through to old path (for compatibility)
+        }
+
+        // Fallback path: call Kotlin callback immediately (for non-jitter-buffered tracks)
         JNIEnv* env = nullptr;
         bool detach = false;
 
@@ -1106,6 +1122,84 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeGetVideoJitterBufferStats(
         static_cast<jlong>(stats.framesReceived),
         static_cast<jlong>(stats.framesOutput),
         static_cast<jlong>(stats.framesDropped),
+        static_cast<jlong>(stats.groupsSkipped),
+        static_cast<jlong>(stats.avgLatencyUs),
+        static_cast<jlong>(stats.maxLatencyUs)
+    );
+
+    env->DeleteLocalRef(statsClass);
+    return statsObj;
+}
+
+//==============================================================================
+// Audio Jitter Buffer JNI Methods
+//==============================================================================
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeCreateAudioJitterBuffer(
+    JNIEnv* env, jobject thiz, jstring track_name, jstring track_key)
+{
+    std::string trackName = jstring_to_string(env, track_name);
+    std::string trackKeyStr = jstring_to_string(env, track_key);
+    LOGI("nativeCreateAudioJitterBuffer: track=%s, key=%s", trackName.c_str(), trackKeyStr.c_str());
+
+    // Create jitter buffer via manager
+    auto& manager = AudioJitterBufferManager::getInstance();
+    manager.createBuffer(trackName, trackKeyStr);
+
+    LOGI("nativeCreateAudioJitterBuffer: Created buffer for track %s", trackName.c_str());
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeDestroyAudioJitterBuffer(
+    JNIEnv* env, jobject thiz, jstring track_name)
+{
+    std::string trackName = jstring_to_string(env, track_name);
+    LOGI("nativeDestroyAudioJitterBuffer: track=%s", trackName.c_str());
+
+    auto& manager = AudioJitterBufferManager::getInstance();
+    manager.destroyBuffer(trackName);
+
+    LOGI("nativeDestroyAudioJitterBuffer: Destroyed buffer for track %s", trackName.c_str());
+}
+
+extern "C"
+JNIEXPORT jobject JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeGetAudioJitterBufferStats(
+    JNIEnv* env, jobject thiz, jstring track_name)
+{
+    std::string trackName = jstring_to_string(env, track_name);
+
+    auto& manager = AudioJitterBufferManager::getInstance();
+    auto* buffer = manager.getBuffer(trackName);
+
+    if (!buffer) {
+        LOGW("nativeGetAudioJitterBufferStats: No buffer for track %s", trackName.c_str());
+        return nullptr;
+    }
+
+    auto stats = buffer->getStats();
+
+    // Create AudioJitterBufferStats object
+    jclass statsClass = env->FindClass("com/cisco/quadroid/transport/AudioJitterBufferStats");
+    if (!statsClass) {
+        LOGE("nativeGetAudioJitterBufferStats: Failed to find AudioJitterBufferStats class");
+        return nullptr;
+    }
+
+    jmethodID statsCtor = env->GetMethodID(statsClass, "<init>", "(JJJJJJ)V");
+    if (!statsCtor) {
+        LOGE("nativeGetAudioJitterBufferStats: Failed to find constructor");
+        env->DeleteLocalRef(statsClass);
+        return nullptr;
+    }
+
+    jobject statsObj = env->NewObject(statsClass, statsCtor,
+        static_cast<jlong>(stats.packetsReceived),
+        static_cast<jlong>(stats.packetsOutput),
+        static_cast<jlong>(stats.packetsDropped),
         static_cast<jlong>(stats.groupsSkipped),
         static_cast<jlong>(stats.avgLatencyUs),
         static_cast<jlong>(stats.maxLatencyUs)

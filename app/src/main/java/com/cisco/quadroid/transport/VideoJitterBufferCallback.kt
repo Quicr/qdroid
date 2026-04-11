@@ -99,3 +99,42 @@ data class VideoJitterBufferStats(
     val maxLatencyMs: Double
         get() = maxLatencyUs / 1000.0
 }
+
+/**
+ * Statistics from the audio jitter buffer for monitoring and debugging.
+ *
+ * @property packetsReceived Total packets added to buffer (from network)
+ * @property packetsOutput Total packets delivered to decoder
+ * @property packetsDropped Packets dropped due to late arrival or buffer overflow
+ * @property groupsSkipped Groups skipped to maintain latency targets
+ * @property avgLatencyUs Average end-to-end latency in microseconds
+ * @property maxLatencyUs Maximum observed latency in microseconds
+ */
+data class AudioJitterBufferStats(
+    val packetsReceived: Long,
+    val packetsOutput: Long,
+    val packetsDropped: Long,
+    val groupsSkipped: Long,
+    val avgLatencyUs: Long,
+    val maxLatencyUs: Long
+) {
+    /**
+     * Packet drop rate as a percentage.
+     */
+    val dropRatePercent: Double
+        get() = if (packetsReceived > 0) {
+            (packetsDropped.toDouble() / packetsReceived) * 100.0
+        } else 0.0
+
+    /**
+     * Average latency in milliseconds.
+     */
+    val avgLatencyMs: Double
+        get() = avgLatencyUs / 1000.0
+
+    /**
+     * Maximum latency in milliseconds.
+     */
+    val maxLatencyMs: Double
+        get() = maxLatencyUs / 1000.0
+}

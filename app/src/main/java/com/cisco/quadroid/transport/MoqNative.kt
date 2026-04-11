@@ -172,4 +172,9 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
     external fun nativeCreateVideoJitterBuffer(trackName: String, callback: VideoJitterBufferCallback)
     external fun nativeDestroyVideoJitterBuffer(trackName: String)
     external fun nativeGetVideoJitterBufferStats(trackName: String): VideoJitterBufferStats?
+
+    // Audio jitter buffer methods
+    external fun nativeCreateAudioJitterBuffer(trackName: String, trackKey: String)
+    external fun nativeDestroyAudioJitterBuffer(trackName: String)
+    external fun nativeGetAudioJitterBufferStats(trackName: String): AudioJitterBufferStats?
 }
