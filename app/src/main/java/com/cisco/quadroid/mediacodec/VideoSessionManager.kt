@@ -24,6 +24,7 @@ import com.cisco.quadroid.transport.MoqNative
 import com.cisco.quadroid.transport.MoqObjectCallback
 import com.cisco.quadroid.transport.MoqTransport
 import com.cisco.quadroid.transport.NamespaceSubscriptionCallback
+import com.cisco.quadroid.transport.PublishOptions
 import com.cisco.quadroid.transport.VideoFrame
 import com.cisco.quadroid.transport.VideoJitterBufferCallback
 import com.cisco.quadroid.util.DeviceIdentifier
@@ -104,7 +105,7 @@ class VideoSessionManager @Inject constructor(
     private val localPrefix = "$meetingNamespace/$userName"
     private val localVideoTrackName = "$localPrefix/video"
     private val localAudioTrackName = "$localPrefix/audio"
-    private val remoteNamespace = "$meetingNamespace/diana"
+    private val remoteNamespace = "$meetingNamespace/bob"
     private val remoteVideoTrackName = "$remoteNamespace/video"
     private val remoteAudioTrackName = "$remoteNamespace/audio"
     
@@ -254,10 +255,66 @@ class VideoSessionManager @Inject constructor(
     }
 
     fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String) {
+        // Save existing track mappings before cleanup (for rejoin scenario)
+        val savedTrackMappings = trackKeyToFullName.toMap()
+
         cleanup()
+
+        // Restore track mappings after cleanup (allows rejoin to work when remote tracks
+        // were already published - relay doesn't replay PUBLISH messages on resubscribe)
+        trackKeyToFullName.putAll(savedTrackMappings)
 
         Log.i(tag, "Starting session with deviceId: $deviceId")
         Log.i(tag, "Local tracks: video=$localVideoTrackName, audio=$localAudioTrackName")
+        if (savedTrackMappings.isNotEmpty()) {
+            Log.i(tag, "Restored ${savedTrackMappings.size} track mappings from previous session (rejoin)")
+
+            // Resubscribe to tracks that were in the previous session
+            // This is needed because we unsubscribed from them in stopSession()
+            savedTrackMappings.forEach { (trackKey, fullTrackName) ->
+                val callback = moqTransport.trackCallbacks[trackKey]
+                if (callback != null) {
+                    Log.i(tag, "Resubscribing to track on rejoin: $fullTrackName")
+                    moqTransport.subscribe(fullTrackName, callback)
+
+                    // Recreate audio jitter buffer if this is an audio track
+                    if (fullTrackName.contains("audio")) {
+                        val moqNative = moqTransport as? MoqNative
+                        moqNative?.nativeCreateAudioJitterBuffer(fullTrackName, trackKey)
+                        Log.i(tag, "Recreated audio jitter buffer for track $trackKey (fullName: $fullTrackName)")
+                    }
+
+                    // Recreate video jitter buffer if this is a video track
+                    // Must create BEFORE packets arrive to avoid "No jitter buffer found" error
+                    if (fullTrackName.contains("video")) {
+                        val moqNative = moqTransport as? MoqNative
+                        if (moqNative != null) {
+                            // Create jitter buffer with callback (will be used when UI listener registers)
+                            val jitterBufferCallback = object : VideoJitterBufferCallback {
+                                override fun onFramesReady(trackName: String, frames: Array<VideoFrame>) {
+                                    val frameListener = videoFrameListeners[trackKey]
+                                    if (frameListener != null) {
+                                        for (frame in frames) {
+                                            frameListener(frame.data, frame.ptsUs)
+                                        }
+                                    } else {
+                                        // UI hasn't registered listener yet - buffer the frames
+                                        Log.v(tag, "[$trackKey] Dropping ${frames.size} frames - no UI listener yet")
+                                    }
+                                }
+                            }
+                            moqNative.nativeCreateVideoJitterBuffer(fullTrackName, jitterBufferCallback)
+                            Log.i(tag, "Recreated video jitter buffer for track $trackKey (fullName: $fullTrackName)")
+                        }
+
+                        // Restore remote participant to trigger UI rendering
+                        addRemoteParticipant(trackKey)
+                    }
+                } else {
+                    Log.w(tag, "No callback found for track $trackKey, cannot resubscribe")
+                }
+            }
+        }
 
         this.lifecycleOwner = lifecycleOwner
         this.rotation = rotation
@@ -321,7 +378,7 @@ class VideoSessionManager @Inject constructor(
         moqTransport.publish(remoteVideoTrackName)
         videoFramer = MoqMediaFramer(moqTransport, remoteVideoTrackName)
 
-        moqTransport.publish(remoteAudioTrackName)
+        moqTransport.publish(remoteAudioTrackName, PublishOptions(3, true))
         audioFramer = MoqAudioFramer(moqTransport, remoteAudioTrackName)
 
 
@@ -485,8 +542,16 @@ class VideoSessionManager @Inject constructor(
         //Unpublish self tracks
         moqTransport.unpublishTrack(remoteVideoTrackName)
         moqTransport.unpublishTrack(remoteAudioTrackName)
+
+        //Unsubscribe from all remote tracks
+        trackKeyToFullName.values.forEach { fullTrackName ->
+            Log.i(tag, "Unsubscribing from track: $fullTrackName")
+            moqTransport.unsubscribeTrack(fullTrackName)
+        }
+
         //Unsubscribe namespace
         moqTransport.unsubscribeNamespace(localPrefix)
+
         cleanup()
     }
 
@@ -537,7 +602,9 @@ class VideoSessionManager @Inject constructor(
         videoFramer = null
         audioFramer = null
         videoFrameListeners.clear()
-        trackKeyToFullName.clear()
+        // DON'T clear trackKeyToFullName - it must persist across session stop/start cycles
+        // for rejoin scenarios. Without this mapping, we can't recreate jitter buffers.
+        // trackKeyToFullName.clear()
     }
 }
 

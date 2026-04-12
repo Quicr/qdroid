@@ -181,7 +181,7 @@ void AudioTrackJitterBuffer::addPacket(
                  trackName_.c_str(), groupId, objectId, dataLen);
         }
     } else {
-        // Success - mark group complete immediately for audio (single packet per group)
+        // Mark group complete immediately - audio uses 1 packet per group
         arbiter_->markGroupComplete(groupId);
 
         // Log periodically

@@ -144,6 +144,11 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
         if (nativePtr != 0L) nativeUnpublishNamespace(nativePtr, namespacePrefix)
     }
 
+    override fun unsubscribeTrack(trackName: String) {
+        //trackCallbacks.remove(trackKey(trackName))
+        if (nativePtr != 0L) nativeUnsubscribe(nativePtr, trackName)
+    }
+
     private fun trackKey(fullName: String): String = TrackUtil.generateTrackKeyFromFullName(fullName)
 
     private external fun nativeConnect(url: String, deviceId: String): Long
@@ -167,6 +172,9 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
     private external fun nativeUnpublishNamespace(ptr: Long, namespacePrefix: String)
     private external fun nativeUnsubscribeNamespace(ptr: Long, namespacePrefix: String)
     private external fun nativeSetNamespaceDefaultBehavior(ptr: Long, acceptAll: Boolean)
+    private external fun nativeUnsubscribe(ptr: Long, trackName: String)
+
+
 
     // Video jitter buffer methods
     external fun nativeCreateVideoJitterBuffer(trackName: String, callback: VideoJitterBufferCallback)
