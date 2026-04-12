@@ -7,6 +7,8 @@ import android.widget.FrameLayout
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,6 +27,21 @@ fun NativeVideoRenderer(
     mirrorHorizontal: Boolean = false,
     aspectRatio: Float? = 0.0f
 ) {
+    var videoSurfaceViewRef: VideoSurfaceView? = null
+
+    // Register/unregister video frame listener only once per trackKey
+    DisposableEffect(trackKey) {
+        Log.d("NativeVideoRenderer", "Registering video frame listener for trackKey: $trackKey")
+
+        viewModel.addVideoFrameListener(trackKey) { data, pts ->
+            videoSurfaceViewRef?.feedFrame(data, pts)
+        }
+
+        onDispose {
+            Log.d("NativeVideoRenderer", "Unregistering video frame listener for trackKey: $trackKey")
+            viewModel.removeVideoFrameListener(trackKey)
+        }
+    }
 
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         AndroidView(
@@ -44,6 +61,7 @@ fun NativeVideoRenderer(
 
                         override fun onSurfaceDestroyed() {
                             Log.d("NativeVideoRenderer", "Surface destroyed for trackKey: $trackKey")
+                            videoSurfaceViewRef = null
                         }
 
                         override fun onVideoSizeChanged(width: Int, height: Int, rotation: Float) {
@@ -55,7 +73,13 @@ fun NativeVideoRenderer(
                             aspectRatioLayout.setAspectRatio(ratio)
                         }
                     }
+
+                    rotationAngle = -90f
+                    this.mirrorHorizontal = mirrorHorizontal
                 }
+
+                // Store reference for the listener
+                videoSurfaceViewRef = videoSurfaceView
 
                 aspectRatioLayout.addView(
                     videoSurfaceView,
@@ -73,16 +97,10 @@ fun NativeVideoRenderer(
                 videoSurfaceView?.let { view ->
                     view.rotationAngle = -90f
                     view.mirrorHorizontal = mirrorHorizontal
-
-                    viewModel.addVideoFrameListener(trackKey) { data, pts ->
-                        view.feedFrame(data, pts)
-                    }
+                    // DO NOT call addVideoFrameListener here - it's handled by DisposableEffect
                 }
             },
-            modifier = Modifier.fillMaxSize(),
-            onRelease = {
-                //viewModel.removeVideoFrameListener(trackKey)
-            }
+            modifier = Modifier.fillMaxSize()
         )
     }
 }

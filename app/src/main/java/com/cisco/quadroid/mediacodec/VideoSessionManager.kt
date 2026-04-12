@@ -20,9 +20,13 @@ import com.cisco.nativeaudio.NativeAudioLib
 import com.cisco.quadroid.transport.MoqAudioFramer
 import com.cisco.quadroid.transport.MoqConnectionStatus
 import com.cisco.quadroid.transport.MoqMediaFramer
+import com.cisco.quadroid.transport.MoqNative
 import com.cisco.quadroid.transport.MoqObjectCallback
 import com.cisco.quadroid.transport.MoqTransport
 import com.cisco.quadroid.transport.NamespaceSubscriptionCallback
+import com.cisco.quadroid.transport.PublishOptions
+import com.cisco.quadroid.transport.VideoFrame
+import com.cisco.quadroid.transport.VideoJitterBufferCallback
 import com.cisco.quadroid.util.DeviceIdentifier
 import com.cisco.quadroid.util.TrackUtil
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -68,6 +72,10 @@ class VideoSessionManager @Inject constructor(
     private val encoderThread = HandlerThread("VideoSessionManager_Encoder").apply { start() }
     private val encoderHandler = Handler(encoderThread.looper)
 
+    // Monitoring for jitter buffer statistics
+    private val monitoringHandler = Handler(android.os.Looper.getMainLooper())
+    private var isMonitoring = false
+
     @Volatile
     private var encoderOutputFormat: MediaFormat? = null
     private var formatLatch = CountDownLatch(1)
@@ -88,21 +96,22 @@ class VideoSessionManager @Inject constructor(
     
     // Meeting Configuration
     private val meetingId = "meeting123"
-    private val userName = "alice"
-    private val userId = "carlos"
-    private val localPrefix = "webex.com/$meetingId/$userName"
     private val meetingNamespace = "webex.com/$meetingId"
 
+    // Each device publishes under its own unique device ID
+    private val deviceId = DeviceIdentifier.get(context)
+    private val userName = "alice"
+    private val userId = "carlos"
+    private val localPrefix = "$meetingNamespace/$userName"
     private val localVideoTrackName = "$localPrefix/video"
     private val localAudioTrackName = "$localPrefix/audio"
-    private val remoteNamespace = "$meetingNamespace/diana"
+    private val remoteNamespace = "$meetingNamespace/bob"
     private val remoteVideoTrackName = "$remoteNamespace/video"
     private val remoteAudioTrackName = "$remoteNamespace/audio"
     
     val connectionStatus: StateFlow<MoqConnectionStatus> = moqTransport.connectionStatus
 
     fun connectToRelay(url: String) {
-        val deviceId = DeviceIdentifier.get(context)
         moqTransport.connect(url, deviceId)
     }
 
@@ -110,34 +119,218 @@ class VideoSessionManager @Inject constructor(
         moqTransport.disconnect()
     }
 
+    // Store mapping from trackKey to full track name for jitter buffer lookup
+    private val trackKeyToFullName = mutableMapOf<String, String>()
+
+    // Monitoring runnable for periodic jitter buffer statistics
+    private val monitoringRunnable = object : Runnable {
+        override fun run() {
+            if (!isMonitoring) return
+
+            val moqNative = moqTransport as? MoqNative
+            if (moqNative != null) {
+                // Monitor video jitter buffers
+                videoFrameListeners.keys.forEach { trackKey ->
+                    val fullTrackName = trackKeyToFullName[trackKey]
+                    if (fullTrackName != null) {
+                        val stats = moqNative.nativeGetVideoJitterBufferStats(fullTrackName)
+                        if (stats != null) {
+                            // Log warning if frame drop rate is significant
+                            if (stats.framesDropped > 0) {
+                                Log.w(tag, "Video Buffer [$trackKey]: recv=${stats.framesReceived}, " +
+                                    "out=${stats.framesOutput}, drop=${stats.framesDropped} " +
+                                    "(${String.format("%.1f", stats.dropRatePercent)}%), " +
+                                    "avgLat=${String.format("%.1f", stats.avgLatencyMs)}ms, " +
+                                    "maxLat=${String.format("%.1f", stats.maxLatencyMs)}ms")
+                            }
+                            // Log info periodically even if no drops
+                            else if (stats.framesOutput > 0) {
+                                Log.i(tag, "Video Buffer [$trackKey]: recv=${stats.framesReceived}, " +
+                                    "out=${stats.framesOutput}, " +
+                                    "avgLat=${String.format("%.1f", stats.avgLatencyMs)}ms")
+                            }
+                        }
+                    }
+                }
+
+                // Monitor audio jitter buffers
+                trackKeyToFullName.forEach { (trackKey, fullTrackName) ->
+                    if (fullTrackName.contains("audio")) {
+                        val stats = moqNative.nativeGetAudioJitterBufferStats(fullTrackName)
+                        if (stats != null) {
+                            // Log warning if packet drop rate is significant
+                            if (stats.packetsDropped > 0) {
+                                Log.w(tag, "Audio Buffer [$trackKey]: recv=${stats.packetsReceived}, " +
+                                    "out=${stats.packetsOutput}, drop=${stats.packetsDropped} " +
+                                    "(${String.format("%.1f", stats.dropRatePercent)}%), " +
+                                    "avgLat=${String.format("%.1f", stats.avgLatencyMs)}ms, " +
+                                    "maxLat=${String.format("%.1f", stats.maxLatencyMs)}ms")
+                            }
+                            // Log info periodically even if no drops
+                            else if (stats.packetsOutput > 0) {
+                                Log.i(tag, "Audio Buffer [$trackKey]: recv=${stats.packetsReceived}, " +
+                                    "out=${stats.packetsOutput}, " +
+                                    "avgLat=${String.format("%.1f", stats.avgLatencyMs)}ms")
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Schedule next check in 5 seconds
+            if (isMonitoring) {
+                monitoringHandler.postDelayed(this, 5000)
+            }
+        }
+    }
+
     fun addVideoFrameListener(trackKey: String, listener: (ByteArray, Long) -> Unit) {
         Log.d(tag, "addVideoFrameListener for $trackKey")
         videoFrameListeners[trackKey] = listener
+
+        // Create native jitter buffer for this track using full track name
+        val moqNative = moqTransport as? MoqNative
+        if (moqNative != null) {
+            // Get full track name for jitter buffer lookup in C++
+            val fullTrackName = trackKeyToFullName[trackKey]
+            if (fullTrackName == null) {
+                Log.w(tag, "No full track name found for trackKey $trackKey, jitter buffer not created")
+                return
+            }
+
+            val callback = object : VideoJitterBufferCallback {
+                override fun onFramesReady(trackName: String, frames: Array<VideoFrame>) {
+                    val frameListener = videoFrameListeners[trackKey] ?: return
+
+                    for (frame in frames) {
+                        // Pass frames to decoder
+                        // shouldRender flag is informational - we pass all frames to maintain decoder state
+                        frameListener(frame.data, frame.ptsUs)
+                    }
+
+                    // Log periodically for monitoring
+                    if (frames.isNotEmpty() && frames[0].objectId % 100 == 0L) {
+                        Log.v(tag, "[$trackKey] Delivered ${frames.size} frames from jitter buffer")
+                    }
+                }
+            }
+
+            // Use full track name (not hashed key) for C++ jitter buffer lookup
+            moqNative.nativeCreateVideoJitterBuffer(fullTrackName, callback)
+            Log.i(tag, "Created jitter buffer for track $trackKey (fullName: $fullTrackName)")
+        } else {
+            Log.w(tag, "MoqTransport is not MoqNative, jitter buffer not available")
+        }
     }
 
     fun removeVideoFrameListener(trackKey: String) {
         Log.d(tag, "removeVideoFrameListener for $trackKey")
+
+        // Destroy native jitter buffer using full track name
+        val moqNative = moqTransport as? MoqNative
+        val fullTrackName = trackKeyToFullName[trackKey]
+        if (fullTrackName != null) {
+            moqNative?.nativeDestroyVideoJitterBuffer(fullTrackName)
+            // Don't remove mapping - keep it for when renderer is recreated
+            // The mapping will be cleared when the session ends in cleanup()
+        }
+
         videoFrameListeners.remove(trackKey)
     }
 
+    private fun startJitterBufferMonitoring() {
+        if (!isMonitoring) {
+            isMonitoring = true
+            monitoringHandler.postDelayed(monitoringRunnable, 5000) // Start after 5 seconds
+            Log.d(tag, "Started jitter buffer monitoring")
+        }
+    }
+
+    private fun stopJitterBufferMonitoring() {
+        if (isMonitoring) {
+            isMonitoring = false
+            monitoringHandler.removeCallbacks(monitoringRunnable)
+            Log.d(tag, "Stopped jitter buffer monitoring")
+        }
+    }
+
     fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String) {
+        // Save existing track mappings before cleanup (for rejoin scenario)
+        val savedTrackMappings = trackKeyToFullName.toMap()
+
         cleanup()
+
+        // Restore track mappings after cleanup (allows rejoin to work when remote tracks
+        // were already published - relay doesn't replay PUBLISH messages on resubscribe)
+        trackKeyToFullName.putAll(savedTrackMappings)
+
+        Log.i(tag, "Starting session with deviceId: $deviceId")
+        Log.i(tag, "Local tracks: video=$localVideoTrackName, audio=$localAudioTrackName")
+        if (savedTrackMappings.isNotEmpty()) {
+            Log.i(tag, "Restored ${savedTrackMappings.size} track mappings from previous session (rejoin)")
+
+            // Resubscribe to tracks that were in the previous session
+            // This is needed because we unsubscribed from them in stopSession()
+            savedTrackMappings.forEach { (trackKey, fullTrackName) ->
+                val callback = moqTransport.trackCallbacks[trackKey]
+                if (callback != null) {
+                    Log.i(tag, "Resubscribing to track on rejoin: $fullTrackName")
+                    moqTransport.subscribe(fullTrackName, callback)
+
+                    // Recreate audio jitter buffer if this is an audio track
+                    if (fullTrackName.contains("audio")) {
+                        val moqNative = moqTransport as? MoqNative
+                        moqNative?.nativeCreateAudioJitterBuffer(fullTrackName, trackKey)
+                        Log.i(tag, "Recreated audio jitter buffer for track $trackKey (fullName: $fullTrackName)")
+                    }
+
+                    // Recreate video jitter buffer if this is a video track
+                    // Must create BEFORE packets arrive to avoid "No jitter buffer found" error
+                    if (fullTrackName.contains("video")) {
+                        val moqNative = moqTransport as? MoqNative
+                        if (moqNative != null) {
+                            // Create jitter buffer with callback (will be used when UI listener registers)
+                            val jitterBufferCallback = object : VideoJitterBufferCallback {
+                                override fun onFramesReady(trackName: String, frames: Array<VideoFrame>) {
+                                    val frameListener = videoFrameListeners[trackKey]
+                                    if (frameListener != null) {
+                                        for (frame in frames) {
+                                            frameListener(frame.data, frame.ptsUs)
+                                        }
+                                    } else {
+                                        // UI hasn't registered listener yet - buffer the frames
+                                        Log.v(tag, "[$trackKey] Dropping ${frames.size} frames - no UI listener yet")
+                                    }
+                                }
+                            }
+                            moqNative.nativeCreateVideoJitterBuffer(fullTrackName, jitterBufferCallback)
+                            Log.i(tag, "Recreated video jitter buffer for track $trackKey (fullName: $fullTrackName)")
+                        }
+
+                        // Restore remote participant to trigger UI rendering
+                        addRemoteParticipant(trackKey)
+                    }
+                } else {
+                    Log.w(tag, "No callback found for track $trackKey, cannot resubscribe")
+                }
+            }
+        }
 
         this.lifecycleOwner = lifecycleOwner
         this.rotation = rotation
         formatLatch = CountDownLatch(1)
         cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
         _isFrontCamera.value = true
-        
+
         if (moqTransport.connectionStatus.value != MoqConnectionStatus.CONNECTED) {
             connectToRelay(relayUrl)
         }
 
         // Subscribe to meeting namespace to discover all participants
-        Log.i(tag, "Subscribing to namespace: $meetingNamespace")
-        moqTransport.subscribeNamespace(meetingNamespace, object : NamespaceSubscriptionCallback {
+        Log.i(tag, "Subscribing to namespace: $localPrefix")
+        moqTransport.subscribeNamespace(localPrefix, object : NamespaceSubscriptionCallback {
             override fun onMatch(trackName: String): Boolean {
-                if (trackName == localVideoTrackName || trackName == localAudioTrackName) {
+                if (trackName == remoteVideoTrackName || trackName == remoteAudioTrackName) {
                     Log.d(tag, "Ignoring own track: $trackName")
                     return false
                 }
@@ -145,33 +338,33 @@ class VideoSessionManager @Inject constructor(
                 Log.i(tag, "Track Discovered: $trackName")
                 val trackKey = TrackUtil.generateTrackKeyFromFullName(trackName)
 
+                // Store mapping for jitter buffer lookup in C++
+                trackKeyToFullName[trackKey] = trackName
+
                 if (trackName.contains("audio")) {
-                    Log.i(tag, "Starting native audio playback for $trackName")
-                    nativeAudioLib.startPlayback(trackKey)
+                    Log.i(tag, "Discovered audio track: $trackName")
+
+                    // Create native audio jitter buffer
+                    // The jitter buffer will create its own NativeAudioLib instance and call startPlayback()
+                    val moqNative = moqTransport as? MoqNative
+                    moqNative?.nativeCreateAudioJitterBuffer(trackName, trackKey)
+                    Log.i(tag, "Created audio jitter buffer for track $trackKey (fullName: $trackName)")
                 }
 
                 moqTransport.trackCallbacks[trackKey] = object : MoqObjectCallback {
                     override fun onObject(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer) {
-                        if (trackName == localVideoTrackName || trackName == localAudioTrackName) {
+                        if (trackName == remoteVideoTrackName || trackName == remoteAudioTrackName) {
                             Log.d(tag, "Ignoring own track: $trackName")
                             return
                         }
+
+                        // Both video and audio are now routed directly to jitter buffers in C++
+                        // This callback only triggers UI updates
                         if (trackName.contains("video")) {
-                            val listener = videoFrameListeners[trackKey]
-                            if (listener != null) {
-                                val bytes = ByteArray(payload.remaining())
-                                payload.get(bytes)
-                                listener(bytes, System.nanoTime() / 1000)
-                            } else {
-                                if (objectId > 50 && objectId % 100 == 0L) {
-                                    Log.w(tag, "No video listener for track $trackKey (trackName=$trackName)")
-                                }
-                            }
+                            // Video routing happens in AndroidSubscribeTrackHandler::ObjectReceived() in C++
                             addRemoteParticipant(trackKey)
-                        } else if (trackName.contains("audio")) {
-                            // Opus packets are self-contained, no codec config needed
-                            nativeAudioLib.feedDecoder(trackKey, payload, payload.remaining())
                         }
+                        // Audio packets now route through jitter buffer in C++ - no callback needed
                     }
                 }
                 
@@ -181,16 +374,20 @@ class VideoSessionManager @Inject constructor(
 
 
         // Publish our tracks
-        Log.i(tag, "Publishing tracks: $localVideoTrackName, $localAudioTrackName")
-        moqTransport.publish(localVideoTrackName)
-        videoFramer = MoqMediaFramer(moqTransport, localVideoTrackName)
+        Log.i(tag, "Publishing tracks: $remoteVideoTrackName, $remoteAudioTrackName")
+        moqTransport.publish(remoteVideoTrackName)
+        videoFramer = MoqMediaFramer(moqTransport, remoteVideoTrackName)
 
-        moqTransport.publish(localAudioTrackName)
-        audioFramer = MoqAudioFramer(moqTransport, localAudioTrackName)
+        moqTransport.publish(remoteAudioTrackName, PublishOptions(3, true))
+        audioFramer = MoqAudioFramer(moqTransport, remoteAudioTrackName)
+
 
         setupEncoder()
         setupCamera(lifecycleOwner)
         startNativeAudio()
+
+        // Start periodic jitter buffer monitoring
+        startJitterBufferMonitoring()
     }
 
     private fun startNativeAudio() {
@@ -343,14 +540,25 @@ class VideoSessionManager @Inject constructor(
     @Synchronized
     fun stopSession() {
         //Unpublish self tracks
-        moqTransport.unpublishTrack(localVideoTrackName)
-        moqTransport.unpublishTrack(localAudioTrackName)
+        moqTransport.unpublishTrack(remoteVideoTrackName)
+        moqTransport.unpublishTrack(remoteAudioTrackName)
+
+        //Unsubscribe from all remote tracks
+        trackKeyToFullName.values.forEach { fullTrackName ->
+            Log.i(tag, "Unsubscribing from track: $fullTrackName")
+            moqTransport.unsubscribeTrack(fullTrackName)
+        }
+
         //Unsubscribe namespace
-        moqTransport.unsubscribeNamespace(meetingNamespace)
+        moqTransport.unsubscribeNamespace(localPrefix)
+
         cleanup()
     }
 
     private fun cleanup() {
+        // Stop jitter buffer monitoring first
+        stopJitterBufferMonitoring()
+
         cameraProvider?.unbindAll()
 
         encoderHandler.removeCallbacksAndMessages(null)
@@ -363,6 +571,27 @@ class VideoSessionManager @Inject constructor(
 
         nativeAudioLib.stopCapture()
 
+        // Destroy all jitter buffers (video and audio) before clearing listeners
+        val moqNative = moqTransport as? MoqNative
+        if (moqNative != null) {
+            // Destroy video jitter buffers
+            videoFrameListeners.keys.forEach { trackKey ->
+                val fullTrackName = trackKeyToFullName[trackKey]
+                if (fullTrackName != null) {
+                    moqNative.nativeDestroyVideoJitterBuffer(fullTrackName)
+                    Log.d(tag, "Destroyed video jitter buffer for track $trackKey (fullName: $fullTrackName)")
+                }
+            }
+
+            // Destroy audio jitter buffers
+            trackKeyToFullName.forEach { (trackKey, fullTrackName) ->
+                if (fullTrackName.contains("audio")) {
+                    moqNative.nativeDestroyAudioJitterBuffer(fullTrackName)
+                    Log.d(tag, "Destroyed audio jitter buffer for track $trackKey (fullName: $fullTrackName)")
+                }
+            }
+        }
+
         inputSurface?.release()
         inputSurface = null
         _remoteParticipants.value = emptyList()
@@ -373,6 +602,9 @@ class VideoSessionManager @Inject constructor(
         videoFramer = null
         audioFramer = null
         videoFrameListeners.clear()
+        // DON'T clear trackKeyToFullName - it must persist across session stop/start cycles
+        // for rejoin scenarios. Without this mapping, we can't recreate jitter buffers.
+        // trackKeyToFullName.clear()
     }
 }
 

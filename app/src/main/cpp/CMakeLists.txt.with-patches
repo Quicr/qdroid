@@ -2,10 +2,6 @@ cmake_minimum_required(VERSION 3.22.1)
 
 project("moq_jni")
 
-# Set C++20 for Kairos jitter buffer support
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
 # Enable FetchContent for libquicr and dependencies
 include(FetchContent)
 
@@ -32,8 +28,6 @@ endif()
 
 add_library(moq_jni SHARED
     moq_jni.cpp
-    video_jitter_buffer.cpp
-    audio_jitter_buffer.cpp
 )
 
 target_link_libraries(moq_jni
@@ -45,11 +39,4 @@ target_link_libraries(moq_jni
 target_include_directories(moq_jni PRIVATE
     ${libquicr_SOURCE_DIR}/include
     ${libquicr_SOURCE_DIR}/src
-    /Users/chaya/Github/kairos/api  # Kairos jitter buffer headers
-)
-
-# Optimization flags for jitter buffer performance
-target_compile_options(moq_jni PRIVATE
-    -O3
-    -fvisibility=hidden
 )

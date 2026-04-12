@@ -104,6 +104,12 @@ interface MoqTransport {
      * @param namespacePrefix The namespace prefix to unpublish.
      */
     fun unpublishNamespace(namespacePrefix: String)
+
+    /**
+     * Unsubscribe from a track.
+     * @param trackName The track name to unsubscribe from.
+     */
+    fun unsubscribeTrack(trackName: String)
 }
 
 data class PublishOptions(

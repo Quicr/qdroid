@@ -9,13 +9,16 @@
 #include <quicr/client.h>
 #include <quicr/object.h>
 #include "moq_util.h"
+#include "video_jitter_buffer.h"
+#include "audio_jitter_buffer.h"
 
 #define LOG_TAG "MoqJni"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// Global JVM reference
-static JavaVM* g_jvm = nullptr;
+// Global JVM reference (non-static to allow access from video_jitter_buffer.cpp)
+JavaVM* g_jvm = nullptr;
 
 // Forward declarations
 class AndroidPublishTrackHandler;
@@ -188,6 +191,48 @@ public:
             return;
         }
 
+        // Get track name string
+        const auto& ftn = GetFullTrackName();
+        std::string track_name_str;
+        for (const auto& entry : ftn.name_space.GetEntries()) {
+            if (!track_name_str.empty()) track_name_str += "/";
+            track_name_str += std::string(entry.begin(), entry.end());
+        }
+        track_name_str += "/";
+        track_name_str += std::string(ftn.name.begin(), ftn.name.end());
+
+        // Check if this is a video track - route to jitter buffer
+        if (track_name_str.find("video") != std::string::npos) {
+            LOGI("Video track detected: %s", track_name_str.c_str());
+            auto& manager = VideoJitterBufferManager::getInstance();
+            if (auto* buffer = manager.getBuffer(track_name_str)) {
+                // Video frame goes directly to jitter buffer (C++ optimization)
+                bool isKeyframe = (hdr.object_id == 0);
+                buffer->addFrame(hdr.group_id, hdr.object_id,
+                               data.data(), data.size(), isKeyframe);
+                return;  // Don't call Kotlin callback for video
+            } else {
+                LOGW("No jitter buffer found for video track: %s", track_name_str.c_str());
+            }
+            // If no jitter buffer, fall through to old path (for compatibility)
+        }
+
+        // Check if this is an audio track - route to jitter buffer
+        if (track_name_str.find("audio") != std::string::npos) {
+            LOGI("Audio track detected: %s", track_name_str.c_str());
+            auto& manager = AudioJitterBufferManager::getInstance();
+            if (auto* buffer = manager.getBuffer(track_name_str)) {
+                // Audio packet goes directly to jitter buffer (C++ optimization)
+                buffer->addPacket(hdr.group_id, hdr.object_id,
+                                data.data(), data.size());
+                return;  // Don't call Kotlin callback for audio
+            } else {
+                LOGW("No jitter buffer found for audio track: %s", track_name_str.c_str());
+            }
+            // If no jitter buffer, fall through to old path (for compatibility)
+        }
+
+        // Fallback path: call Kotlin callback immediately (for non-jitter-buffered tracks)
         JNIEnv* env = nullptr;
         bool detach = false;
 
@@ -209,16 +254,6 @@ public:
             if (detach) g_jvm->DetachCurrentThread();
             return;
         }
-
-        // Get track name string
-        const auto& ftn = GetFullTrackName();
-        std::string track_name_str;
-        for (const auto& entry : ftn.name_space.GetEntries()) {
-            if (!track_name_str.empty()) track_name_str += "/";
-            track_name_str += std::string(entry.begin(), entry.end());
-        }
-        track_name_str += "/";
-        track_name_str += std::string(ftn.name.begin(), ftn.name.end());
 
         jstring jtrack_name = env->NewStringUTF(track_name_str.c_str());
 
@@ -289,6 +324,7 @@ public:
                                      jobject callback_ref)
       : quicr::SubscribeNamespaceHandler(prefix)
       , callback_ref_(callback_ref)
+      , callback_valid_(true)
     {
         LOGI("Created AndroidSubscribeNamespaceHandler");
     }
@@ -300,10 +336,17 @@ public:
             new AndroidSubscribeNamespaceHandler(prefix, callback_ref));
     }
 
-    jobject GetCallbackRef() const { return callback_ref_; }
+    jobject GetCallbackRef() const {
+        return callback_valid_.load() ? callback_ref_ : nullptr;
+    }
+
+    void InvalidateCallback() {
+        callback_valid_.store(false);
+    }
 
 private:
     jobject callback_ref_;
+    std::atomic<bool> callback_valid_;
 };
 
 //==============================================================================
@@ -953,10 +996,18 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeUnsubscribeNamespace(JNIEnv *e
 
     if (handler) {
         LOGI("nativeUnsubscribeNamespace: Unsubscribing from namespace %s", prefix.c_str());
+
+        // Get the callback ref before invalidating
+        jobject callback_to_delete = handler->GetCallbackRef();
+
+        // Invalidate the callback first so pending messages won't try to use it
+        handler->InvalidateCallback();
+
+        // Unsubscribe from the namespace
         context->client->UnsubscribeNamespace(handler);
 
         // Clean up the callback reference
-        if (handler->GetCallbackRef()) {
+        if (callback_to_delete) {
             JNIEnv* env_for_cleanup = nullptr;
             bool detach = false;
             if (g_jvm->GetEnv(reinterpret_cast<void**>(&env_for_cleanup), JNI_VERSION_1_6) == JNI_EDETACHED) {
@@ -965,7 +1016,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeUnsubscribeNamespace(JNIEnv *e
             }
 
             if (env_for_cleanup) {
-                env_for_cleanup->DeleteGlobalRef(handler->GetCallbackRef());
+                env_for_cleanup->DeleteGlobalRef(callback_to_delete);
             }
 
             if (detach) g_jvm->DetachCurrentThread();
@@ -975,4 +1026,185 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeUnsubscribeNamespace(JNIEnv *e
     } else {
         LOGE("nativeUnsubscribeNamespace: No active namespace subscription for prefix: %s", prefix.c_str());
     }
+}
+
+//==============================================================================
+// Video Jitter Buffer JNI Methods
+//==============================================================================
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeCreateVideoJitterBuffer(
+    JNIEnv* env, jobject thiz, jstring track_name, jobject callback)
+{
+    std::string trackName = jstring_to_string(env, track_name);
+    LOGI("nativeCreateVideoJitterBuffer: track=%s", trackName.c_str());
+
+    if (!callback) {
+        LOGE("nativeCreateVideoJitterBuffer: Null callback provided");
+        return;
+    }
+
+    // Create global reference for callback (will be used by decode thread)
+    jobject callbackGlobalRef = env->NewGlobalRef(callback);
+    if (!callbackGlobalRef) {
+        LOGE("nativeCreateVideoJitterBuffer: Failed to create global ref");
+        return;
+    }
+
+    // Create jitter buffer via manager
+    auto& manager = VideoJitterBufferManager::getInstance();
+    manager.createBuffer(trackName, callbackGlobalRef);
+
+    LOGI("nativeCreateVideoJitterBuffer: Created buffer for track %s", trackName.c_str());
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeDestroyVideoJitterBuffer(
+    JNIEnv* env, jobject thiz, jstring track_name)
+{
+    std::string trackName = jstring_to_string(env, track_name);
+    LOGI("nativeDestroyVideoJitterBuffer: track=%s", trackName.c_str());
+
+    auto& manager = VideoJitterBufferManager::getInstance();
+
+    // Get buffer to retrieve callback ref for cleanup BEFORE destroying the buffer
+    jobject callbackRef = nullptr;
+    if (auto* buffer = manager.getBuffer(trackName)) {
+        callbackRef = buffer->getCallbackRef();
+    }
+
+    // Destroy the buffer (stops decode thread, cleans up resources)
+    manager.destroyBuffer(trackName);
+
+    // Delete the global reference we created in nativeCreateVideoJitterBuffer
+    if (callbackRef) {
+        env->DeleteGlobalRef(callbackRef);
+        LOGI("nativeDestroyVideoJitterBuffer: Deleted global callback ref for track %s", trackName.c_str());
+    }
+
+    LOGI("nativeDestroyVideoJitterBuffer: Destroyed buffer for track %s", trackName.c_str());
+}
+
+extern "C"
+JNIEXPORT jobject JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeGetVideoJitterBufferStats(
+    JNIEnv* env, jobject thiz, jstring track_name)
+{
+    std::string trackName = jstring_to_string(env, track_name);
+
+    auto& manager = VideoJitterBufferManager::getInstance();
+    auto* buffer = manager.getBuffer(trackName);
+
+    if (!buffer) {
+        LOGW("nativeGetVideoJitterBufferStats: No buffer for track %s", trackName.c_str());
+        return nullptr;
+    }
+
+    auto stats = buffer->getStats();
+
+    // Create VideoJitterBufferStats object
+    jclass statsClass = env->FindClass("com/cisco/quadroid/transport/VideoJitterBufferStats");
+    if (!statsClass) {
+        LOGE("nativeGetVideoJitterBufferStats: Failed to find VideoJitterBufferStats class");
+        return nullptr;
+    }
+
+    jmethodID statsCtor = env->GetMethodID(statsClass, "<init>", "(JJJJJJ)V");
+    if (!statsCtor) {
+        LOGE("nativeGetVideoJitterBufferStats: Failed to find constructor");
+        env->DeleteLocalRef(statsClass);
+        return nullptr;
+    }
+
+    jobject statsObj = env->NewObject(statsClass, statsCtor,
+        static_cast<jlong>(stats.framesReceived),
+        static_cast<jlong>(stats.framesOutput),
+        static_cast<jlong>(stats.framesDropped),
+        static_cast<jlong>(stats.groupsSkipped),
+        static_cast<jlong>(stats.avgLatencyUs),
+        static_cast<jlong>(stats.maxLatencyUs)
+    );
+
+    env->DeleteLocalRef(statsClass);
+    return statsObj;
+}
+
+//==============================================================================
+// Audio Jitter Buffer JNI Methods
+//==============================================================================
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeCreateAudioJitterBuffer(
+    JNIEnv* env, jobject thiz, jstring track_name, jstring track_key)
+{
+    std::string trackName = jstring_to_string(env, track_name);
+    std::string trackKeyStr = jstring_to_string(env, track_key);
+    LOGI("nativeCreateAudioJitterBuffer: track=%s, key=%s", trackName.c_str(), trackKeyStr.c_str());
+
+    // Create jitter buffer via manager
+    auto& manager = AudioJitterBufferManager::getInstance();
+    manager.createBuffer(trackName, trackKeyStr);
+
+    LOGI("nativeCreateAudioJitterBuffer: Created buffer for track %s", trackName.c_str());
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeDestroyAudioJitterBuffer(
+    JNIEnv* env, jobject thiz, jstring track_name)
+{
+    std::string trackName = jstring_to_string(env, track_name);
+    LOGI("nativeDestroyAudioJitterBuffer: track=%s", trackName.c_str());
+
+    auto& manager = AudioJitterBufferManager::getInstance();
+    manager.destroyBuffer(trackName);
+
+    LOGI("nativeDestroyAudioJitterBuffer: Destroyed buffer for track %s", trackName.c_str());
+}
+
+extern "C"
+JNIEXPORT jobject JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeGetAudioJitterBufferStats(
+    JNIEnv* env, jobject thiz, jstring track_name)
+{
+    std::string trackName = jstring_to_string(env, track_name);
+
+    auto& manager = AudioJitterBufferManager::getInstance();
+    auto* buffer = manager.getBuffer(trackName);
+
+    if (!buffer) {
+        LOGW("nativeGetAudioJitterBufferStats: No buffer for track %s", trackName.c_str());
+        return nullptr;
+    }
+
+    auto stats = buffer->getStats();
+
+    // Create AudioJitterBufferStats object
+    jclass statsClass = env->FindClass("com/cisco/quadroid/transport/AudioJitterBufferStats");
+    if (!statsClass) {
+        LOGE("nativeGetAudioJitterBufferStats: Failed to find AudioJitterBufferStats class");
+        return nullptr;
+    }
+
+    jmethodID statsCtor = env->GetMethodID(statsClass, "<init>", "(JJJJJJ)V");
+    if (!statsCtor) {
+        LOGE("nativeGetAudioJitterBufferStats: Failed to find constructor");
+        env->DeleteLocalRef(statsClass);
+        return nullptr;
+    }
+
+    jobject statsObj = env->NewObject(statsClass, statsCtor,
+        static_cast<jlong>(stats.packetsReceived),
+        static_cast<jlong>(stats.packetsOutput),
+        static_cast<jlong>(stats.packetsDropped),
+        static_cast<jlong>(stats.groupsSkipped),
+        static_cast<jlong>(stats.avgLatencyUs),
+        static_cast<jlong>(stats.maxLatencyUs)
+    );
+
+    env->DeleteLocalRef(statsClass);
+    return statsObj;
 }
