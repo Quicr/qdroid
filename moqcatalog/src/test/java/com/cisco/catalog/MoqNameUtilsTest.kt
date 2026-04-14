@@ -92,14 +92,36 @@ class MoqNameUtilsTest {
 
     @Test
     fun testEmptyNamespace() {
-        // Track name only, no namespace
+        // Track name only, no namespace - created with createSafeForm
         val safeForm = MoqNameUtils.createSafeForm(trackName = "track1")
 
+        // When created, it will be just "track1" (no "--")
         assertEquals("track1", safeForm)
 
+        // When parsed, strings without "--" are treated as namespace with empty track name
         val (namespaces, trackName) = MoqNameUtils.parseSafeForm(safeForm)
-        assertEquals(0, namespaces.size)
-        assertEquals("track1", trackName)
+        assertEquals(1, namespaces.size)
+        assertEquals("track1", namespaces[0])
+        assertEquals("", trackName) // Empty track name
+    }
+
+    @Test
+    fun testNamespaceOnlyNoTrackName() {
+        // Test parsing a namespace-only safe form (no double hyphen)
+        val safeForm = "cisco.2ewebex.2ecom-nab-v1"
+
+        val urlForm = MoqNameUtils.safeFormToUrl(safeForm)
+
+        // Should return just the namespace path without trailing slash
+        assertEquals("cisco.webex.com/nab/v1", urlForm)
+
+        // Verify parsed components
+        val (namespaces, trackName) = MoqNameUtils.parseSafeForm(safeForm)
+        assertEquals(3, namespaces.size)
+        assertEquals("cisco.webex.com", namespaces[0])
+        assertEquals("nab", namespaces[1])
+        assertEquals("v1", namespaces[2])
+        assertEquals("", String(trackName)) // Empty track name
     }
 
     @Test
@@ -280,11 +302,12 @@ class MoqNameUtilsTest {
     @Test
     fun testIsValidSafeForm() {
         // Valid safe forms
-        assertTrue(MoqNameUtils.isValidSafeForm("track1"))
+        assertTrue(MoqNameUtils.isValidSafeForm("track1")) // Treated as namespace with empty track name
         assertTrue(MoqNameUtils.isValidSafeForm("ns1--track1"))
         assertTrue(MoqNameUtils.isValidSafeForm("ns1-ns2--track1"))
         assertTrue(MoqNameUtils.isValidSafeForm("example.2enet-team2-project_x--report"))
         assertTrue(MoqNameUtils.isValidSafeForm("ns1-.2e--track"))  // Valid: ns1 and encoded period
+        assertTrue(MoqNameUtils.isValidSafeForm("cisco.2ewebex.2ecom-nab-v1")) // Namespace only (no --)
 
         // Invalid safe forms
         assertFalse(MoqNameUtils.isValidSafeForm(""))

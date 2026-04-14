@@ -53,6 +53,7 @@ class MainViewModel @Inject constructor(
     }
 
     fun disconnectFromRelay() {
+        videoSessionManager.resetCatalog()
         videoSessionManager.disconnectFromRelay()
         last_connected_url = null
     }

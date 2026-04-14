@@ -24,7 +24,7 @@ object MoqNameUtils {
      * Characters that are allowed in safe form without encoding.
      * Only a-z, A-Z, 0-9, and _ (0x5f) are allowed.
      */
-    private val ALLOWED_CHARS = (('a'..'z') + ('A'..'Z') + ('0'..'9') + '_').toSet()
+    private val ALLOWED_CHARS = (('a'..'z') + ('A'..'Z') + ('0'..'9') + '_' + '-').toSet()
 
     /**
      * Converts namespace tuples and track name to safe form string.
@@ -57,6 +57,8 @@ object MoqNameUtils {
      *   Input: "example.2enet-team2-project_x--report"
      *   Output: namespaceTuples = ["example.net", "team2", "project_x"], trackName = "report"
      *
+     * If no double hyphen is found, the entire string is treated as a namespace with empty track name.
+     *
      * @param safeForm The safe form string representation
      * @return Pair of (namespace tuples, track name) as ByteArrays
      * @throws IllegalArgumentException if the safe form is invalid
@@ -70,8 +72,9 @@ object MoqNameUtils {
         val doubleDashIndex = safeForm.indexOf("--")
 
         return if (doubleDashIndex == -1) {
-            // No double hyphen found, treat entire string as track name with empty namespace
-            Pair(emptyList(), decodeSafeForm(safeForm))
+            // No double hyphen found, treat entire string as namespace with empty track name
+            val namespaceTuples = parseNamespaceTuples(safeForm)
+            Pair(namespaceTuples, ByteArray(0)) // Empty track name
         } else {
             // Split namespace and track name
             val namespaceStr = safeForm.substring(0, doubleDashIndex)
@@ -105,6 +108,8 @@ object MoqNameUtils {
      * - Safe form: cisco.2ewebex.2ecom-nab-v1-publisher_211919113--catalog
      * - URL format: cisco.webex.com/nab/v1/publisher_211919113/catalog
      *
+     * If the safe form has no track name (no "--"), returns just the namespace path.
+     *
      * @param safeForm The safe form string representation
      * @return URL format string
      */
@@ -118,11 +123,11 @@ object MoqNameUtils {
         }
         val trackNameStr = String(trackName, StandardCharsets.UTF_8)
 
-        return if (namespaceParts.isEmpty()) {
-            trackNameStr
-        } else {
-            // Join namespace tuples with / and append track name
-            "${namespaceParts.joinToString("/")}/$trackNameStr"
+        return when {
+            namespaceParts.isEmpty() && trackNameStr.isEmpty() -> ""
+            namespaceParts.isEmpty() -> trackNameStr
+            trackNameStr.isEmpty() -> namespaceParts.joinToString("/") // No track name, just namespace
+            else -> "${namespaceParts.joinToString("/")}/$trackNameStr"
         }
     }
 

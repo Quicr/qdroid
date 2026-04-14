@@ -110,6 +110,7 @@ interface MoqTransport {
      * @param trackName The track name to unsubscribe from.
      */
     fun unsubscribeTrack(trackName: String)
+    fun endSubgroup(trackName: String, groupId: Long, subgroupId: Long, completed: Boolean)
 }
 
 data class PublishOptions(

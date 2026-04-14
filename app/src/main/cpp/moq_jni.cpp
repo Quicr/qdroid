@@ -158,6 +158,15 @@ public:
                 break;
         }
     }
+
+    void EndSubgroup(uint64_t group_id, uint64_t subgroup_id, bool completed) override{
+        LOGI("PublishTrack EndSubgroup: group_id=%llu subgroup_id=%llu completed=%d",
+             group_id, subgroup_id, completed);
+
+        // Call base class implementation to properly signal QUICR
+        quicr::PublishTrackHandler::EndSubgroup(group_id, subgroup_id, completed);
+    }
+
 };
 
 //==============================================================================
@@ -1026,6 +1035,26 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeUnsubscribeNamespace(JNIEnv *e
     } else {
         LOGE("nativeUnsubscribeNamespace: No active namespace subscription for prefix: %s", prefix.c_str());
     }
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeEndSubGroup(JNIEnv *env, jobject thiz, jlong ptr, jstring track_name, jlong group_id,
+                                                              jlong subgroup_id, jboolean completed) {
+    auto context = reinterpret_cast<MoqContext *>(ptr);
+
+    if (!context || !context->client) {
+        LOGE("nativeEndSubGroup: Invalid context");
+        return;
+    }
+    std::string name = jstring_to_string(env, track_name);
+
+    auto handler = context->client->get_publish_handler(name);
+    if (!handler) {
+        LOGE("nativeEndSubGroup: No publish handler for track %s", name.c_str());
+        return;
+    }
+    handler->EndSubgroup(group_id, subgroup_id, completed);
 }
 
 //==============================================================================

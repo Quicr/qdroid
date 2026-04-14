@@ -167,6 +167,11 @@ class MainActivity : ComponentActivity() {
 fun MainScreen(viewModel: MainViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val remoteParticipants by viewModel.remoteParticipants.collectAsStateWithLifecycle()
+
+    // Debug logging for remote participants
+    LaunchedEffect(remoteParticipants.size) {
+        Log.i("MainActivity", "Remote participants changed: count=${remoteParticipants.size}, ids=${remoteParticipants.map { it.id }.joinToString()}")
+    }
     val isMicEnabled by viewModel.isMicEnabled.collectAsStateWithLifecycle()
     val isVideoEnabled by viewModel.isVideoEnabled.collectAsStateWithLifecycle()
     val videoToggleCount by viewModel.videoToggleCount.collectAsStateWithLifecycle()
@@ -572,6 +577,11 @@ fun InCallScreen(
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
+    // Debug logging for layout decisions
+    LaunchedEffect(remoteParticipants.size) {
+        Log.i("InCallScreen", "Remote participants: ${remoteParticipants.size}, showing ${if (remoteParticipants.isEmpty()) "local preview fullscreen" else "grid + PIP"}")
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -586,6 +596,7 @@ fun InCallScreen(
         // Video Participants Grid (Layer 0)
         Box(modifier = Modifier.fillMaxSize()) {
             if (remoteParticipants.isEmpty()) {
+                Log.d("InCallScreen", "Rendering local preview fullscreen (no remote participants)")
                 if (isVideoEnabled) {
                     key(videoToggleCount) {
                         PreviewNativeVideoRenderer(
@@ -602,6 +613,7 @@ fun InCallScreen(
                     }
                 }
             } else {
+                Log.d("InCallScreen", "Rendering AdaptiveNativeGrid with ${remoteParticipants.size} participants")
                 AdaptiveNativeGrid(
                     viewModel = viewModel,
                     participants = remoteParticipants,

@@ -30,7 +30,14 @@ package com.cisco.catalog
  */
 class MoqCatalog {
     private val catalogManager = MsfCatalogManager()
+    private val publisherId: String = "0XCA1A109" // Publisher ID for catalog subscription
 
+    // Build catalog track name in safe form: cisco.2ewebex.2ecom-nab-v1-publisher_<id>--catalog
+    val catalogTrackSafeForm =
+        "cisco.2ewebex.2ecom-nab-v1-catalog-publisher_${publisherId}--catalog"
+
+    // Convert from safe form to URL format
+    val catalogTrackUrl = MoqNameUtils.safeFormToUrl(catalogTrackSafeForm)
     /**
      * Updates the catalog with new JSON data.
      *

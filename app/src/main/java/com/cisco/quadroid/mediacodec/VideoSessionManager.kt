@@ -60,13 +60,22 @@ class VideoSessionManager @Inject constructor(
     // Coroutine scope for observing connection status
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    // Video Config
+    // Video Config - Will be populated from catalog
     private val videoMimeType = MediaFormat.MIMETYPE_VIDEO_AVC
-    private val width = 1280
-    private val height = 720
-    private val bitRate = 4000000
-    private val frameRate = 30
     private val iFrameInterval = 2
+
+    // Multi-quality video encoder configuration
+    data class VideoEncoderConfig(
+        val track: MsfTrack,
+        val trackNameUrl: String,
+        val width: Int,
+        val height: Int,
+        val bitrate: Int,
+        val framerate: Int,
+        val priority: Int // 1 = highest (1080p), 2 = medium (720p), 3 = lowest (360p)
+    )
+
+    private val videoEncoderConfigs = mutableListOf<VideoEncoderConfig>()
 
     private val nativeAudioLib = NativeAudioLib()
     private var isMicEnabled = true
@@ -79,8 +88,19 @@ class VideoSessionManager @Inject constructor(
     private val _isFrontCamera = MutableStateFlow(true)
     val isFrontCamera: StateFlow<Boolean> = _isFrontCamera.asStateFlow()
 
-    private var encoder: MediaCodec? = null
-    private var inputSurface: Surface? = null
+    // Multi-encoder support - one encoder per quality level
+    data class EncoderState(
+        val encoder: MediaCodec,
+        val inputSurface: Surface,
+        val config: VideoEncoderConfig,
+        val framer: MoqMediaFramer,
+        var isActive: Boolean = false // Track if encoder is currently receiving camera input
+    )
+
+    private val encoders = mutableListOf<EncoderState>()
+    private var activeEncoderIndex = 0 // Index of currently active encoder (for camera binding)
+    private var consecutiveGoodFrames = 0 // Track consecutive successful encodes for quality upgrade
+    private var lastEncoderError = 0L // Timestamp of last encoder error
     private val encoderThread = HandlerThread("VideoSessionManager_Encoder").apply { start() }
     private val encoderHandler = Handler(encoderThread.looper)
 
@@ -90,20 +110,39 @@ class VideoSessionManager @Inject constructor(
 
     @Volatile
     private var encoderOutputFormat: MediaFormat? = null
-    private var formatLatch = CountDownLatch(1)
+    private var formatLatch = CountDownLatch(1) // No longer used with multi-encoder
 
     // Listeners for raw video objects
     private val videoFrameListeners = ConcurrentHashMap<String, (ByteArray, Long) -> Unit>()
 
+    // Remote participant tracking with multi-quality support
+    data class RemoteVideoTrack(
+        val trackKey: String,
+        val fullTrackName: String,
+        val priority: Int, // 1=highest, 2=medium, 3=lowest
+        val displayWidth: Int,
+        val displayHeight: Int,
+        var isReceivingObjects: Boolean = false,
+        var consecutiveFramesReceived: Int = 0
+    )
+
+    data class RemoteParticipantState(
+        val participantId: String,
+        val videoTracks: MutableList<RemoteVideoTrack> = mutableListOf(), // sorted by priority
+        var activeTrackKey: String? = null, // Currently displayed track
+        var audioTrackKey: String? = null
+    )
+
+    private val remoteParticipantStates = ConcurrentHashMap<String, RemoteParticipantState>()
+
     private val _remoteParticipants = MutableStateFlow<List<ParticipantStream>>(emptyList())
     val remoteParticipants: StateFlow<List<ParticipantStream>> = _remoteParticipants.asStateFlow()
 
-    private val _videoAspectRatio = MutableStateFlow(height.toFloat() / width.toFloat())
+    private val _videoAspectRatio = MutableStateFlow(9f / 16f) // Default portrait aspect ratio
     val videoAspectRatio: StateFlow<Float> = _videoAspectRatio.asStateFlow()
 
     private var localPreviewSurface: Surface? = null
 
-    private var videoFramer: MoqMediaFramer? = null
     private var audioFramer: MoqAudioFramer? = null
 
     // Catalog state management
@@ -119,27 +158,25 @@ class VideoSessionManager @Inject constructor(
 
     // Meeting Configuration
     private val meetingId = "meeting123"
-
-    private val publisherId: String = "0XCA1A109" // Publisher ID for catalog subscription
     private val meetingNamespace = "webex.com/$meetingId"
 
     // Each device publishes under its own unique device ID
     private val deviceId = DeviceIdentifier.get(context)
     private val userName = "alice"
     private val userId = "carlos"
-    private val localPrefix = "$meetingNamespace/$userName"
-    private val localVideoTrackName = "$localPrefix/video"
-    private val localAudioTrackName = "$localPrefix/audio"
-    private val remoteNamespace = "$meetingNamespace/bob"
-    private val remoteVideoTrackName = "$remoteNamespace/video"
-    private val remoteAudioTrackName = "$remoteNamespace/audio"
+
+    // Note: Track names are now defined in the catalog, not hardcoded here
 
     val connectionStatus: StateFlow<MoqConnectionStatus> = moqTransport.connectionStatus
 
     init {
+        Log.e("QUADROID_DEBUG", "VideoSessionManager INIT - deviceId=$deviceId")
+        Log.e(tag, "⭐ VideoSessionManager initialized with deviceId=$deviceId, meetingId=$meetingId")
+
         // Observe connection status and subscribe to catalog when connected
         scope.launch {
             connectionStatus.collect { status ->
+                Log.e("QUADROID_DEBUG", "Connection status: $status")
                 Log.d(tag, "Connection status changed to: $status")
                 if (status == MoqConnectionStatus.CONNECTED && !catalogSubscribed) {
                     Log.i(tag, "Connection established, subscribing to catalog track")
@@ -227,20 +264,15 @@ class VideoSessionManager @Inject constructor(
     }
 
     private fun subscribeToCatalogTrack() {
-        // Build catalog track name in safe form: cisco.2ewebex.2ecom-nab-v1-publisher_<id>--catalog
-        val catalogTrackSafeForm =
-            "cisco.2ewebex.2ecom-nab-v1-catalog-publisher_${publisherId}--catalog"
 
-        // Convert from safe form to URL format
-        val catalogTrackUrl = MoqNameUtils.safeFormToUrl(catalogTrackSafeForm)
 
         Log.i(
             tag,
-            "Subscribing to catalog track: $catalogTrackUrl (safe form: $catalogTrackSafeForm)"
+            "Subscribing to catalog track: $moqCatalog.catalogTrackUrl (safe form: $moqCatalog.catalogTrackSafeForm)"
         )
 
         // Generate track key for the catalog track
-        val catalogTrackKey = TrackUtil.generateTrackKeyFromFullName(catalogTrackUrl)
+        val catalogTrackKey = TrackUtil.generateTrackKeyFromFullName(moqCatalog.catalogTrackUrl)
 
         moqTransport.trackCallbacks[catalogTrackKey] = object : MoqObjectCallback {
             override fun onObject(
@@ -277,7 +309,7 @@ class VideoSessionManager @Inject constructor(
         }
 
         // Subscribe to the catalog track
-        moqTransport.subscribe(catalogTrackUrl, callback = object : MoqObjectCallback {
+        moqTransport.subscribe(moqCatalog.catalogTrackUrl, callback = object : MoqObjectCallback {
             override fun onObject(
                 trackName: String,
                 groupId: Long,
@@ -312,62 +344,385 @@ class VideoSessionManager @Inject constructor(
         })
     }
 
-                private fun handleCatalogUpdate(result: CatalogUpdateResult) {
-            Log.i(tag, "Catalog updated: version=${result.version}, tracks=${result.totalTracks}, " +
+    private fun handleCatalogUpdate(result: CatalogUpdateResult) {
+        Log.i(
+            tag, "Catalog updated: version=${result.version}, tracks=${result.totalTracks}, " +
                     "added=${result.tracksAdded}, removed=${result.tracksRemoved}, " +
-                    "refreshed=${result.refreshed}, isDelta=${result.isDelta}")
+                    "refreshed=${result.refreshed}, isDelta=${result.isDelta}"
+        )
 
-            // Check if version changed
-            val versionChanged = catalogVersion != result.version
-            catalogVersion = result.version
+        // Check if version changed
+        val versionChanged = catalogVersion != result.version
+        catalogVersion = result.version
 
-            if (versionChanged || result.refreshed) {
-                // Update catalog tracks and namespaces
-                updateCatalogTracksAndNamespaces()
-            }
-
-            // Mark catalog as ready
-            if (!_isCatalogReady.value) {
-                _isCatalogReady.value = true
-                Log.i(tag, "Catalog is now ready")
-            }
+        if (versionChanged || result.refreshed) {
+            // Update catalog tracks and namespaces
+            updateCatalogTracksAndNamespaces()
         }
 
-                private fun updateCatalogTracksAndNamespaces() {
-            val tracks = moqCatalog.getTracks()
+        // Mark catalog as ready
+        if (!_isCatalogReady.value) {
+            _isCatalogReady.value = true
+            Log.i(tag, "Catalog is now ready")
+        }
+    }
 
-            // Clear existing lists
-            catalogTracks.clear()
-            catalogTrackNamesUrl.clear()
-            catalogNamespacesUrl.clear()
+    private fun updateCatalogTracksAndNamespaces() {
+        val tracks = moqCatalog.getTracks()
 
-            // Collect unique namespaces
-            val namespacesSet = mutableSetOf<String>()
+        // Clear existing lists
+        catalogTracks.clear()
+        catalogTrackNamesUrl.clear()
+        catalogNamespacesUrl.clear()
 
-            // Process tracks
-            tracks.forEach { track ->
-                catalogTracks.add(track)
+        // Collect unique namespaces
+        val namespacesSet = mutableSetOf<String>()
 
-                // Build track name in URL format
-                val namespace = track.namespace
-                val trackName = track.name
+        // Process tracks
+        tracks.forEach { track ->
+            catalogTracks.add(track)
 
-                if (namespace != null) {
-                    val trackFullNameUrl = "$namespace/$trackName"
-                    catalogTrackNamesUrl.add(trackFullNameUrl)
-                    namespacesSet.add(namespace)
-                } else {
-                    catalogTrackNamesUrl.add(trackName)
+            // Build track name in URL format
+            val namespace = track.namespace
+            val trackName = track.name
+
+            if (namespace != null) {
+                var namespaceUrl = MoqNameUtils.safeFormToUrl(namespace)
+
+                // Replace publisher_{id} with publisher_{device_id} for local tracks (not catalog track)
+                // Catalog track is identified by having "catalog" as the track name
+                if (trackName != "catalog") {
+                    // Replace publisher_<any_id> with publisher_<device_id>
+                    namespaceUrl = namespaceUrl.replace(
+                        Regex("publisher_[^/]+"),
+                        "publisher_$deviceId"
+                    )
                 }
 
-                Log.d(tag, "Catalog track: $trackName, namespace: $namespace, codec: ${track.codec}, role: ${track.role}")
+                val trackFullNameUrl = "$namespaceUrl/$trackName"
+                catalogTrackNamesUrl.add(trackFullNameUrl)
+                val subscribeNamespace = namespaceUrl.substringBeforeLast("/")
+                namespacesSet.add(subscribeNamespace)
+            } else {
+                catalogTrackNamesUrl.add(trackName)
             }
 
-            // Store namespaces
-            catalogNamespacesUrl.addAll(namespacesSet)
-
-            Log.i(tag, "Updated catalog: ${catalogTracks.size} tracks, ${catalogNamespacesUrl.size} namespaces")
+            Log.d(
+                tag,
+                "Catalog track: $trackName, namespace: $namespace, codec: ${track.codec}, role: ${track.role}, url: ${catalogTrackNamesUrl.lastOrNull()}"
+            )
         }
+
+        // Store namespaces
+        catalogNamespacesUrl.addAll(namespacesSet)
+
+        Log.i(
+            tag,
+            "Updated catalog: ${catalogTracks.size} tracks, ${catalogNamespacesUrl.size} namespaces"
+        )
+        Log.i(tag, "Device ID: $deviceId")
+        Log.i(tag, "Local track URLs: ${catalogTrackNamesUrl.filter { !it.contains("catalog") }.joinToString(", ")}")
+
+        // Log all catalog tracks for debugging
+        catalogTracks.forEachIndexed { index, track ->
+            Log.d(tag, "Catalog[$index]: name=${track.name}, role=${track.role}, codec=${track.codec}, ${track.width}x${track.height}, namespace=${track.namespace}")
+        }
+
+        // Parse video tracks and setup encoder configs
+        parseVideoEncoderConfigs()
+    }
+
+    private fun parseVideoEncoderConfigs() {
+        videoEncoderConfigs.clear()
+
+        // Find all video tracks for the local user from catalog
+        catalogTracks.forEachIndexed { index, track ->
+            val trackNameUrl = catalogTrackNamesUrl.getOrNull(index)
+            if (trackNameUrl != null && track.role == "video" && track.codec != null) {
+                val width = track.width ?: 1280
+                val height = track.height ?: 720
+                val bitrate = track.bitrate ?: 2000000
+                val framerate = track.framerate?.toInt() ?: 30
+
+                // Determine priority based on height
+                val priority = when {
+                    height >= 1080 -> 1 // 1080p - highest priority
+                    height >= 720 -> 2  // 720p - medium priority
+                    else -> 3            // 360p or lower - lowest priority
+                }
+
+                val config = VideoEncoderConfig(
+                    track = track,
+                    trackNameUrl = trackNameUrl,
+                    width = width,
+                    height = height,
+                    bitrate = bitrate,
+                    framerate = framerate,
+                    priority = priority
+                )
+
+                videoEncoderConfigs.add(config)
+                Log.i(
+                    tag,
+                    "Parsed video encoder config: ${track.name}, ${width}x${height}, ${bitrate}bps, ${framerate}fps, priority=$priority"
+                )
+            }
+        }
+
+        // Sort by priority (highest first)
+        videoEncoderConfigs.sortBy { it.priority }
+
+        Log.i(tag, "Configured ${videoEncoderConfigs.size} video encoders")
+    }
+
+    /**
+     * Extract participant ID from track name namespace.
+     * Uses the last tuple of the namespace before the track name.
+     * E.g., "webex.com/meeting123/bob/video" -> "bob"
+     */
+    private fun extractParticipantId(trackName: String): String {
+        val parts = trackName.split("/")
+        // Get the second to last part (last part is track name like "video" or "audio")
+        return if (parts.size >= 2) {
+            parts[parts.size - 2]
+        } else {
+            trackName // Fallback to full track name if parsing fails
+        }
+    }
+
+    /**
+     * Find a catalog track by matching the track name.
+     * Handles both exact matches and suffix-based matching.
+     */
+    private fun findCatalogTrackByName(trackName: String): MsfTrack? {
+        Log.v(tag, "findCatalogTrackByName: searching for $trackName")
+
+        // Try exact match first (unlikely for remote tracks, but possible for local)
+        catalogTracks.forEachIndexed { index, track ->
+            val trackUrl = catalogTrackNamesUrl.getOrNull(index)
+            if (trackUrl == trackName) {
+                Log.d(tag, "Found exact match: ${track.name}")
+                return track
+            }
+        }
+
+        // For video tracks, prioritize dimension matching to distinguish between different resolutions
+        // Track names contain resolution in path: .../avc1/1080/... or .../avc1/720/...
+        if (trackName.contains("video")) {
+            val inferredHeight = when {
+                trackName.contains("/1080/") || trackName.contains("1080p") -> 1080
+                trackName.contains("/720/") || trackName.contains("720p") -> 720
+                trackName.contains("/360/") || trackName.contains("360p") -> 360
+                else -> null
+            }
+
+            if (inferredHeight != null) {
+                val dimensionMatch = catalogTracks.find { track ->
+                    track.role == "video" && track.height == inferredHeight
+                }
+                if (dimensionMatch != null) {
+                    Log.d(tag, "Found dimension match: ${dimensionMatch.name} with height=$inferredHeight for trackName=$trackName")
+                    return dimensionMatch
+                }
+            }
+        }
+
+        // Fallback: Match by track name suffix
+        // Remote: "cisco.webex.com/nab/v1/publisher_remoteId/video_1080p"
+        // Catalog: track.name = "video_1080p" or "video"
+        val trackNameSuffix = trackName.substringAfterLast("/")
+        Log.v(tag, "Trying suffix match with: $trackNameSuffix")
+
+        // First try: exact suffix match
+        val exactMatch = catalogTracks.find { track ->
+            track.name == trackNameSuffix
+        }
+        if (exactMatch != null) {
+            Log.d(tag, "Found suffix match: ${exactMatch.name}")
+            return exactMatch
+        }
+
+        // Second try: check if track name ends with catalog track name
+        // This handles cases like track="video" matching trackName="...publisher_123/video"
+        val endsWithMatch = catalogTracks.find { track ->
+            trackName.endsWith("/${track.name}")
+        }
+        if (endsWithMatch != null) {
+            Log.d(tag, "Found endsWith match: ${endsWithMatch.name}")
+            return endsWithMatch
+        }
+
+        Log.w(tag, "No catalog track match found for: $trackName")
+        return null
+    }
+
+    /**
+     * Handle incoming video object for adaptive quality switching.
+     * Updates track state and switches to higher/lower quality as needed.
+     */
+    private fun handleRemoteVideoObject(participantId: String, trackKey: String, objectId: Long) {
+        Log.v(tag, "handleRemoteVideoObject: participantId=$participantId, trackKey=$trackKey, objectId=$objectId")
+
+        val participantState = remoteParticipantStates[participantId]
+        if (participantState == null) {
+            Log.e(tag, "No participant state found for participantId=$participantId")
+            Log.e(tag, "Available participants: ${remoteParticipantStates.keys.joinToString()}")
+            return
+        }
+
+        // Find the track that received the object
+        val receivingTrack = participantState.videoTracks.find { it.trackKey == trackKey }
+        if (receivingTrack == null) {
+            Log.e(tag, "Track not found: trackKey=$trackKey for participantId=$participantId")
+            Log.e(tag, "Available tracks: ${participantState.videoTracks.map { it.trackKey }.joinToString()}")
+            return
+        }
+
+        // Update track state
+        receivingTrack.isReceivingObjects = true
+        receivingTrack.consecutiveFramesReceived++
+
+        Log.d(tag, "Track $trackKey receiving: consecutiveFrames=${receivingTrack.consecutiveFramesReceived}, priority=${receivingTrack.priority}")
+
+        // Adaptive quality switching logic
+        val currentActiveKey = participantState.activeTrackKey
+
+        if (currentActiveKey == null) {
+            // No active track yet - select the highest priority (lowest priority number) track
+            // videoTracks is already sorted by priority, so first one is best
+            val bestTrack = participantState.videoTracks.firstOrNull()
+            if (bestTrack != null) {
+                Log.e("QUADROID_DEBUG", "📺 Selecting BEST track: ${bestTrack.trackKey}, priority=${bestTrack.priority}")
+                Log.i(tag, "No active track, selecting best: trackKey=${bestTrack.trackKey}, priority=${bestTrack.priority}")
+                switchToTrack(participantState, bestTrack.trackKey)
+                Log.i(
+                    tag,
+                    "Initial track selection for $participantId: priority=${bestTrack.priority}, ${bestTrack.displayWidth}x${bestTrack.displayHeight}"
+                )
+            } else {
+                Log.w(tag, "No tracks available for participant $participantId")
+            }
+        } else {
+            val currentTrack = participantState.videoTracks.find { it.trackKey == currentActiveKey }
+
+            // Special case for initial discovery (objectId==0): if a better track is discovered, switch immediately
+            if (objectId == 0L && receivingTrack.priority < (currentTrack?.priority ?: Int.MAX_VALUE)) {
+                Log.e("QUADROID_DEBUG", "📺 NEW BEST track discovered: ${receivingTrack.trackKey}, priority=${receivingTrack.priority} (better than current priority=${currentTrack?.priority})")
+                Log.i(tag, "Switching to better track discovered during initial setup")
+                switchToTrack(participantState, receivingTrack.trackKey)
+                Log.i(
+                    tag,
+                    "Switched to better track for $participantId: ${currentTrack?.priority} -> ${receivingTrack.priority} (${receivingTrack.displayWidth}x${receivingTrack.displayHeight})"
+                )
+            }
+            // Check if we should upgrade to higher quality (lower priority number) for real objects
+            else if (objectId > 0L && receivingTrack.priority < (currentTrack?.priority ?: Int.MAX_VALUE)) {
+                // Higher priority track is receiving - check if we have 5 consecutive frames
+                if (receivingTrack.consecutiveFramesReceived >= 5) {
+                    switchToTrack(participantState, receivingTrack.trackKey)
+                    Log.i(
+                        tag,
+                        "Upgraded quality for $participantId: ${currentTrack?.priority} -> ${receivingTrack.priority} (${receivingTrack.displayWidth}x${receivingTrack.displayHeight})"
+                    )
+                }
+            } else if (objectId > 0L && currentTrack != null && !currentTrack.isReceivingObjects) {
+                // Current track stopped receiving - downgrade to next available quality
+                val fallbackTrack = participantState.videoTracks
+                    .filter { it.isReceivingObjects && it.priority > currentTrack.priority }
+                    .minByOrNull { it.priority } // Get highest priority available fallback
+
+                if (fallbackTrack != null) {
+                    switchToTrack(participantState, fallbackTrack.trackKey)
+                    Log.w(
+                        tag,
+                        "Downgraded quality for $participantId: ${currentTrack.priority} -> ${fallbackTrack.priority} (${fallbackTrack.displayWidth}x${fallbackTrack.displayHeight})"
+                    )
+                }
+            }
+        }
+
+        // Reset consecutive frame count for tracks not receiving
+        // Skip this logic when objectId==0 (initial selection trigger, not real objects)
+        if (objectId > 0) {
+            participantState.videoTracks.forEach { track ->
+                if (track.trackKey != trackKey) {
+                    // Mark as not receiving if we haven't seen objects recently
+                    // This is simplified - a production implementation might use timestamps
+                    if (track.consecutiveFramesReceived > 0) {
+                        track.consecutiveFramesReceived--
+                    }
+                    if (track.consecutiveFramesReceived == 0) {
+                        track.isReceivingObjects = false
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Switch the active track for a participant and update UI.
+     */
+    private fun switchToTrack(participantState: RemoteParticipantState, newTrackKey: String) {
+        val oldTrackKey = participantState.activeTrackKey
+        participantState.activeTrackKey = newTrackKey
+
+        val newTrack = participantState.videoTracks.find { it.trackKey == newTrackKey }
+        if (newTrack != null) {
+            // Update UI with new participant stream
+            updateRemoteParticipantUI(
+                participantState.participantId,
+                newTrackKey,
+                newTrack.displayWidth.toFloat() / newTrack.displayHeight.toFloat()
+            )
+        }
+
+        // Reset consecutive frames for the new track
+        newTrack?.consecutiveFramesReceived = 0
+    }
+
+    /**
+     * Update the UI with the participant's active track.
+     * Removes old tracks for this participant and adds the new active track.
+     */
+    private fun updateRemoteParticipantUI(participantId: String, activeTrackKey: String, aspectRatio: Float) {
+        Log.i(tag, "updateRemoteParticipantUI: participantId=$participantId, activeTrackKey=$activeTrackKey, aspectRatio=$aspectRatio")
+
+        // Capture participant track keys before posting to handler (thread safety)
+        val participantState = remoteParticipantStates[participantId]
+        val participantTrackKeys = participantState?.videoTracks?.map { it.trackKey } ?: emptyList()
+        Log.d(tag, "Participant $participantId has ${participantTrackKeys.size} tracks: ${participantTrackKeys.joinToString()}")
+
+        Handler(context.mainLooper).post {
+            val currentParticipants = _remoteParticipants.value
+            Log.d(tag, "Current participants before update: count=${currentParticipants.size}, ids=[${currentParticipants.map { it.id }.joinToString()}]")
+
+            // Remove any existing streams for this participant's other tracks
+            val filteredParticipants = currentParticipants.filterNot {
+                participantTrackKeys.contains(it.id) && it.id != activeTrackKey
+            }
+            Log.d(tag, "After filtering: count=${filteredParticipants.size}, ids=[${filteredParticipants.map { it.id }.joinToString()}]")
+
+            // Check if the active track is already in the list
+            val existingParticipant = filteredParticipants.find { it.id == activeTrackKey }
+
+            if (existingParticipant == null) {
+                // Add new participant stream with the active track
+                val stream = ParticipantStream(activeTrackKey, aspectRatio)
+                val newParticipants = filteredParticipants + stream
+                _remoteParticipants.value = newParticipants
+                Log.e("QUADROID_DEBUG", "🎉 REMOTE PARTICIPANT ADDED TO UI!")
+                Log.e("QUADROID_DEBUG", "   participantId: $participantId")
+                Log.e("QUADROID_DEBUG", "   trackKey: $activeTrackKey")
+                Log.e("QUADROID_DEBUG", "   Total count: ${_remoteParticipants.value.size}")
+                Log.i(tag, "✅ Added remote participant UI: $participantId with trackKey: $activeTrackKey, aspectRatio: $aspectRatio")
+                Log.i(tag, "✅ Total remote participants: ${_remoteParticipants.value.size}, ids=[${_remoteParticipants.value.map { it.id }.joinToString()}]")
+            } else {
+                // Track is already showing, just update the filtered list
+                _remoteParticipants.value = filteredParticipants
+                Log.d(tag, "Track $activeTrackKey already showing for $participantId")
+            }
+        }
+    }
 
     fun addVideoFrameListener(trackKey: String, listener: (ByteArray, Long) -> Unit) {
         Log.d(tag, "addVideoFrameListener for $trackKey")
@@ -440,6 +795,11 @@ class VideoSessionManager @Inject constructor(
     }
 
     fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String) {
+        Log.e("QUADROID_DEBUG", "╔════════════════════════════════════════╗")
+        Log.e("QUADROID_DEBUG", "║    START SESSION CALLED               ║")
+        Log.e("QUADROID_DEBUG", "╚════════════════════════════════════════╝")
+        Log.e(tag, "⭐ startSession: relayUrl=$relayUrl, deviceId=$deviceId")
+
         // Save existing track mappings before cleanup (for rejoin scenario)
         val savedTrackMappings = trackKeyToFullName.toMap()
 
@@ -450,7 +810,8 @@ class VideoSessionManager @Inject constructor(
         trackKeyToFullName.putAll(savedTrackMappings)
 
         Log.i(tag, "Starting session with deviceId: $deviceId")
-        Log.i(tag, "Local tracks: video=$localVideoTrackName, audio=$localAudioTrackName")
+        Log.i(tag, "Local tracks from catalog: ${catalogTrackNamesUrl.joinToString(", ")}")
+        /*
         if (savedTrackMappings.isNotEmpty()) {
             Log.i(tag, "Restored ${savedTrackMappings.size} track mappings from previous session (rejoin)")
 
@@ -499,7 +860,7 @@ class VideoSessionManager @Inject constructor(
                     Log.w(tag, "No callback found for track $trackKey, cannot resubscribe")
                 }
             }
-        }
+        }*/
 
         this.lifecycleOwner = lifecycleOwner
         this.rotation = rotation
@@ -512,62 +873,190 @@ class VideoSessionManager @Inject constructor(
         }
 
         // Subscribe to meeting namespace to discover all participants
-        Log.i(tag, "Subscribing to namespace: $localPrefix")
-        moqTransport.subscribeNamespace(localPrefix, object : NamespaceSubscriptionCallback {
+        // Extract common parent namespace to cover all quality levels
+        // From cisco.webex.com/nab/v1/avc1/1080 -> cisco.webex.com/nab/v1
+        val subscriptionNamespace = if (catalogNamespacesUrl.isNotEmpty()) {
+            val firstNamespace = catalogNamespacesUrl[0]
+            // Remove the last two levels (codec type and quality) to get common parent
+            val parts = firstNamespace.split("/")
+            if (parts.size >= 2) {
+                parts.dropLast(2).joinToString("/")
+            } else {
+                firstNamespace
+            }
+        } else {
+            meetingNamespace
+        }
+
+        Log.e("QUADROID_DEBUG", "⭐ Subscribing to namespace: $subscriptionNamespace")
+        Log.i(tag, "Subscribing to namespace: $subscriptionNamespace (covers all quality levels)")
+        moqTransport.subscribeNamespace(subscriptionNamespace, object : NamespaceSubscriptionCallback {
             override fun onMatch(trackName: String): Boolean {
-                if (trackName == remoteVideoTrackName || trackName == remoteAudioTrackName) {
+                Log.e("QUADROID_DEBUG", "🔍 onMatch called for track: $trackName")
+
+                if (catalogTrackNamesUrl.contains(trackName)) {
+                    Log.e("QUADROID_DEBUG", "❌ Ignoring own track: $trackName")
                     Log.d(tag, "Ignoring own track: $trackName")
                     return false
                 }
-                
-                Log.i(tag, "Track Discovered: $trackName")
+
+                Log.e("QUADROID_DEBUG", "✅ REMOTE TRACK DISCOVERED: $trackName")
+                Log.i(tag, "========== Track Discovered: $trackName ==========")
                 val trackKey = TrackUtil.generateTrackKeyFromFullName(trackName)
+                Log.e("QUADROID_DEBUG", "🔑 Generated trackKey: $trackKey")
+                Log.i(tag, "Generated trackKey: $trackKey")
 
                 // Store mapping for jitter buffer lookup in C++
                 trackKeyToFullName[trackKey] = trackName
 
+                // Extract participant ID from namespace (last tuple before track name)
+                val participantId = extractParticipantId(trackName)
+                Log.i(tag, "Extracted participant ID: $participantId from track: $trackName")
+
+                // Find matching track in catalog to get media properties
+                val catalogTrack = findCatalogTrackByName(trackName)
+                if (catalogTrack != null) {
+                    Log.i(tag, "Found catalog track: name=${catalogTrack.name}, role=${catalogTrack.role}, codec=${catalogTrack.codec}, ${catalogTrack.width}x${catalogTrack.height}")
+                } else {
+                    Log.w(tag, "No catalog track found for: $trackName")
+                }
+
                 if (trackName.contains("audio")) {
-                    Log.i(tag, "Discovered audio track: $trackName")
+                    Log.i(tag, "Discovered audio track: $trackName for participant: $participantId")
 
                     // Create native audio jitter buffer
-                    // The jitter buffer will create its own NativeAudioLib instance and call startPlayback()
                     val moqNative = moqTransport as? MoqNative
                     moqNative?.nativeCreateAudioJitterBuffer(trackName, trackKey)
-                    Log.i(tag, "Created audio jitter buffer for track $trackKey (fullName: $trackName)")
+                    Log.i(tag, "Created audio jitter buffer for track $trackKey")
+
+                    // Associate audio track with participant
+                    val participantState = remoteParticipantStates.getOrPut(participantId) {
+                        RemoteParticipantState(participantId = participantId)
+                    }
+                    participantState.audioTrackKey = trackKey
+                } else if (trackName.contains("video")) {
+                    Log.i(tag, "Discovered video track: $trackName for participant: $participantId")
+
+                    // Get display dimensions and priority from catalog track (or use defaults)
+                    val displayWidth: Int
+                    val displayHeight: Int
+                    val priority: Int
+
+                    if (catalogTrack != null) {
+                        displayWidth = catalogTrack.displayWidth ?: catalogTrack.width ?: 1280
+                        displayHeight = catalogTrack.displayHeight ?: catalogTrack.height ?: 720
+                        priority = when {
+                            (catalogTrack.height ?: 720) >= 1080 -> 1
+                            (catalogTrack.height ?: 720) >= 720 -> 2
+                            else -> 3
+                        }
+                        Log.i(tag, "Using catalog dimensions: ${displayWidth}x${displayHeight}")
+                    } else {
+                        // Fallback: Try to infer quality from track name
+                        Log.w(tag, "No catalog track found, inferring from track name")
+                        when {
+                            trackName.contains("1080") -> {
+                                displayWidth = 1920
+                                displayHeight = 1080
+                                priority = 1
+                            }
+                            trackName.contains("720") -> {
+                                displayWidth = 1280
+                                displayHeight = 720
+                                priority = 2
+                            }
+                            trackName.contains("360") -> {
+                                displayWidth = 640
+                                displayHeight = 360
+                                priority = 3
+                            }
+                            else -> {
+                                // Default to 720p if we can't determine
+                                displayWidth = 1280
+                                displayHeight = 720
+                                priority = 2
+                                Log.w(tag, "Could not determine quality, using 720p default")
+                            }
+                        }
+                    }
+
+                    val remoteTrack = RemoteVideoTrack(
+                        trackKey = trackKey,
+                        fullTrackName = trackName,
+                        priority = priority,
+                        displayWidth = displayWidth,
+                        displayHeight = displayHeight
+                    )
+
+                    // Add track to participant state
+                    val participantState = remoteParticipantStates.getOrPut(participantId) {
+                        RemoteParticipantState(participantId = participantId)
+                    }
+                    participantState.videoTracks.add(remoteTrack)
+                    participantState.videoTracks.sortBy { it.priority }
+
+                    // Create jitter buffer for this video track (decode all qualities)
+                    val moqNative = moqTransport as? MoqNative
+                    if (moqNative != null) {
+                        val jitterBufferCallback = object : VideoJitterBufferCallback {
+                            override fun onFramesReady(trackName: String, frames: Array<VideoFrame>) {
+                                val frameListener = videoFrameListeners[trackKey]
+                                if (frameListener != null) {
+                                    for (frame in frames) {
+                                        frameListener(frame.data, frame.ptsUs)
+                                    }
+                                } else {
+                                    // Decoder not ready yet - this is OK, frames will be buffered
+                                    if (frames.isNotEmpty() && frames[0].objectId % 100 == 0L) {
+                                        Log.v(tag, "[$trackKey] No listener yet for ${frames.size} frames")
+                                    }
+                                }
+                            }
+                        }
+                        moqNative.nativeCreateVideoJitterBuffer(trackName, jitterBufferCallback)
+                        Log.i(tag, "Created video jitter buffer for track $trackKey (priority=$priority)")
+                    }
+
+                    Log.i(
+                        tag,
+                        "Added video track for $participantId: priority=$priority, ${displayWidth}x${displayHeight}"
+                    )
+
+                    // Trigger initial UI update immediately (don't wait for objects)
+                    // Objects go directly to jitter buffer in C++, bypassing Kotlin callback
+                    Log.e("QUADROID_DEBUG", "🎬 Triggering initial track selection for $participantId")
+                    handleRemoteVideoObject(participantId, trackKey, 0)
                 }
 
+                // Note: onObject callback is bypassed when jitter buffers exist
+                // Objects go directly from C++ to jitter buffer
                 moqTransport.trackCallbacks[trackKey] = object : MoqObjectCallback {
                     override fun onObject(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer) {
-                        if (trackName == remoteVideoTrackName || trackName == remoteAudioTrackName) {
-                            Log.d(tag, "Ignoring own track: $trackName")
-                            return
+                        // This callback is NOT called when jitter buffers exist
+                        // Keeping it for compatibility but it won't be invoked for video
+                        if (!catalogTrackNamesUrl.contains(trackName) && trackName.contains("video")) {
+                            Log.d(tag, "onObject called for $trackName (unexpected with jitter buffer)")
                         }
-
-                        // Both video and audio are now routed directly to jitter buffers in C++
-                        // This callback only triggers UI updates
-                        if (trackName.contains("video")) {
-                            // Video routing happens in AndroidSubscribeTrackHandler::ObjectReceived() in C++
-                            addRemoteParticipant(trackKey)
-                        }
-                        // Audio packets now route through jitter buffer in C++ - no callback needed
                     }
                 }
-                
+
                 return true
             }
         })
 
 
         // Publish our tracks
-        Log.i(tag, "Publishing tracks: $remoteVideoTrackName, $remoteAudioTrackName")
-        moqTransport.publish(remoteVideoTrackName)
-        videoFramer = MoqMediaFramer(moqTransport, remoteVideoTrackName)
+        for (catalogTrackName in catalogTrackNamesUrl) {
+            Log.i(tag, "Publishing tracks: $catalogTrackName")
+            if (catalogTrackName.contains("video")) {
+                moqTransport.publish(catalogTrackName, PublishOptions(TrackUtil.getTrackPriority(catalogTrackName), false))
+            } else if (catalogTrackName.contains("audio")) {
+                audioFramer = MoqAudioFramer(moqTransport, catalogTrackName)
+                moqTransport.publish(catalogTrackName, PublishOptions(1, true))
+            }
+        }
 
-        moqTransport.publish(remoteAudioTrackName, PublishOptions(3, true))
-        audioFramer = MoqAudioFramer(moqTransport, remoteAudioTrackName)
-
-
-        setupEncoder()
+        setupEncoders()
         setupCamera(lifecycleOwner)
         startNativeAudio()
 
@@ -622,38 +1111,69 @@ class VideoSessionManager @Inject constructor(
         val provider = cameraProvider ?: return
         provider.unbindAll()
 
+        if (encoders.isEmpty()) {
+            Log.w(tag, "No encoders configured, skipping camera bind")
+            return
+        }
+
+        // Validate active encoder index
+        if (activeEncoderIndex < 0 || activeEncoderIndex >= encoders.size) {
+            activeEncoderIndex = 0
+        }
+
+        val activeEncoder = encoders[activeEncoderIndex]
+        val activeConfig = activeEncoder.config
+
+        // Mark encoder as active
+        encoders.forEach { it.isActive = false }
+        activeEncoder.isActive = true
+
         val resolutionSelector = ResolutionSelector.Builder()
-            .setResolutionStrategy(ResolutionStrategy(Size(width, height), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
+            .setResolutionStrategy(
+                ResolutionStrategy(
+                    Size(activeConfig.width, activeConfig.height),
+                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                )
+            )
             .build()
 
+        // Create preview use case ONLY for the active encoder
         val encoderPreview = Preview.Builder()
             .setTargetRotation(rotation)
             .setResolutionSelector(resolutionSelector)
             .build().apply {
                 setSurfaceProvider { request ->
-                    inputSurface?.let { 
-                        request.provideSurface(it, ContextCompat.getMainExecutor(context)) {} 
-                    }
+                    request.provideSurface(
+                        activeEncoder.inputSurface,
+                        ContextCompat.getMainExecutor(context)
+                    ) {}
                 }
             }
 
+        // Create local UI preview
         val localUiPreview = Preview.Builder()
             .setTargetRotation(rotation)
             .setResolutionSelector(resolutionSelector)
             .build()
-            
+
         localPreviewSurface?.let { surface ->
             localUiPreview.setSurfaceProvider { request ->
                 request.provideSurface(surface, ContextCompat.getMainExecutor(context)) {}
             }
         }
-        
+
         try {
+            // Bind only active encoder + UI preview (max 2 use cases)
+            val useCases = mutableListOf(encoderPreview)
             if (localPreviewSurface != null) {
-                provider.bindToLifecycle(owner, cameraSelector, encoderPreview, localUiPreview)
-            } else {
-                provider.bindToLifecycle(owner, cameraSelector, encoderPreview)
+                useCases.add(localUiPreview)
             }
+
+            provider.bindToLifecycle(owner, cameraSelector, *useCases.toTypedArray())
+            Log.i(
+                tag,
+                "Bound camera with active encoder ${activeEncoderIndex} (${activeConfig.width}x${activeConfig.height}, priority=${activeConfig.priority})"
+            )
         } catch (exc: Exception) {
             Log.e(tag, "Use case binding failed", exc)
         }
@@ -675,44 +1195,192 @@ class VideoSessionManager @Inject constructor(
         lifecycleOwner?.let { bindCameraUseCases(it) }
     }
 
-    private fun setupEncoder() {
-        val format = MediaFormat.createVideoFormat(videoMimeType, width, height).apply {
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
-            setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
-            // Prepend SPS/PPS to keyframes for easier decoding by late-joiners
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
+    /**
+     * Switch to a different encoder quality for local preview.
+     * Follows the same upgrade/downgrade rules as remote participants.
+     */
+    private fun switchLocalEncoderQuality(newIndex: Int) {
+        if (newIndex < 0 || newIndex >= encoders.size) {
+            Log.w(tag, "Invalid encoder index: $newIndex")
+            return
+        }
+
+        if (newIndex == activeEncoderIndex) {
+            return // Already at this quality
+        }
+
+        val oldIndex = activeEncoderIndex
+        val oldConfig = encoders[oldIndex].config
+        val newConfig = encoders[newIndex].config
+
+        activeEncoderIndex = newIndex
+        consecutiveGoodFrames = 0
+
+        Log.i(
+            tag,
+            "Local encoder quality switch: ${oldConfig.priority} (${oldConfig.width}x${oldConfig.height}) -> " +
+                    "${newConfig.priority} (${newConfig.width}x${newConfig.height})"
+        )
+
+        // Rebind camera with new encoder
+        lifecycleOwner?.let { bindCameraUseCases(it) }
+
+        // Update aspect ratio for UI
+        val newAspectRatio = newConfig.height.toFloat() / newConfig.width.toFloat()
+        _videoAspectRatio.value = newAspectRatio
+    }
+
+    /**
+     * Attempt to upgrade to higher quality encoder.
+     * Upgrades to the next higher priority (lower number) encoder.
+     */
+    private fun tryUpgradeLocalQuality() {
+        // Find next higher quality (lower priority number)
+        val currentPriority = encoders[activeEncoderIndex].config.priority
+        val higherQualityIndex = encoders.indexOfFirst { it.config.priority < currentPriority }
+
+        if (higherQualityIndex >= 0) {
+            Log.d(tag, "Upgrading local quality after $consecutiveGoodFrames consecutive good frames")
+            switchLocalEncoderQuality(higherQualityIndex)
+        }
+    }
+
+    /**
+     * Downgrade to lower quality encoder immediately.
+     * Downgrades to the next lower priority (higher number) encoder.
+     */
+    private fun downgradeLocalQuality() {
+        // Find next lower quality (higher priority number)
+        val currentPriority = encoders[activeEncoderIndex].config.priority
+        val lowerQualityIndex = encoders.indexOfFirst { it.config.priority > currentPriority }
+
+        if (lowerQualityIndex >= 0) {
+            Log.w(tag, "Downgrading local quality due to encoding issues")
+            switchLocalEncoderQuality(lowerQualityIndex)
+        } else {
+            Log.w(tag, "Already at lowest quality, cannot downgrade further")
+        }
+    }
+
+    private fun setupEncoders() {
+        // Create one encoder per video quality level
+        videoEncoderConfigs.forEach { config ->
+            try {
+                val format = MediaFormat.createVideoFormat(
+                    videoMimeType,
+                    config.width,
+                    config.height
+                ).apply {
+                    setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                    setInteger(MediaFormat.KEY_BIT_RATE, config.bitrate)
+                    setInteger(MediaFormat.KEY_FRAME_RATE, config.framerate)
+                    setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
+                    // Prepend SPS/PPS to keyframes for easier decoding by late-joiners
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                        setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
+                    }
+                }
+
+                // Create framer for this track
+                val framer = MoqMediaFramer(moqTransport, config.trackNameUrl)
+
+                val encoder = MediaCodec.createEncoderByType(videoMimeType).apply {
+                    setCallback(object : MediaCodec.Callback() {
+                        override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {}
+                        override fun onOutputBufferAvailable(
+                            codec: MediaCodec,
+                            index: Int,
+                            info: MediaCodec.BufferInfo
+                        ) {
+                            try {
+                                getOutputBuffer(index)?.let { buffer ->
+                                    if (info.size > 0) {
+                                        framer.processFrame(buffer, info)
+
+                                        // Track encoding success for adaptive quality (only for active encoder)
+                                        val encoderIndex = encoders.indexOfFirst {
+                                            it.config.trackNameUrl == config.trackNameUrl
+                                        }
+                                        if (encoderIndex == activeEncoderIndex) {
+                                            consecutiveGoodFrames++
+
+                                            // Upgrade after 5 consecutive good frames (same rule as remote)
+                                            if (consecutiveGoodFrames >= 5) {
+                                                tryUpgradeLocalQuality()
+                                            }
+                                        }
+                                    }
+                                }
+                                releaseOutputBuffer(index, false)
+                            } catch (e: IllegalStateException) {
+                                Log.e(tag, "Encoder output error for ${config.trackNameUrl}", e)
+
+                                // Track error and trigger downgrade if this is the active encoder
+                                val encoderIndex = encoders.indexOfFirst {
+                                    it.config.trackNameUrl == config.trackNameUrl
+                                }
+                                if (encoderIndex == activeEncoderIndex) {
+                                    lastEncoderError = System.currentTimeMillis()
+                                    consecutiveGoodFrames = 0
+                                    downgradeLocalQuality()
+                                }
+                            }
+                        }
+
+                        override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
+                            Log.e(tag, "Encoder Error for ${config.trackNameUrl}", e)
+
+                            // Downgrade on encoder error if this is the active encoder
+                            val encoderIndex = encoders.indexOfFirst {
+                                it.config.trackNameUrl == config.trackNameUrl
+                            }
+                            if (encoderIndex == activeEncoderIndex) {
+                                lastEncoderError = System.currentTimeMillis()
+                                consecutiveGoodFrames = 0
+                                downgradeLocalQuality()
+                            }
+                        }
+
+                        override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
+                            Log.d(tag, "Encoder format changed for ${config.trackNameUrl}: $format")
+                        }
+                    }, encoderHandler)
+                    configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                }
+
+                val inputSurface = encoder.createInputSurface()
+                encoder.start()
+
+                val encoderState = EncoderState(
+                    encoder = encoder,
+                    inputSurface = inputSurface,
+                    config = config,
+                    framer = framer
+                )
+
+                encoders.add(encoderState)
+                Log.i(
+                    tag,
+                    "Created encoder for ${config.trackNameUrl}: ${config.width}x${config.height}, ${config.bitrate}bps"
+                )
+            } catch (e: Exception) {
+                Log.e(tag, "Failed to setup video encoder for ${config.trackNameUrl}", e)
             }
         }
 
-        try {
-            encoder = MediaCodec.createEncoderByType(videoMimeType).apply {
-                setCallback(object : MediaCodec.Callback() {
-                    override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {}
-                    override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                        try {
-                            getOutputBuffer(index)?.let { buffer ->
-                                if (info.size > 0) {
-                                    videoFramer?.processFrame(buffer, info)
-                                }
-                            }
-                            releaseOutputBuffer(index, false)
-                        } catch (e: IllegalStateException) {}
-                    }
-                    override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) { Log.e(tag, "Encoder Error", e) }
-                    override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
-                        encoderOutputFormat = format
-                        formatLatch.countDown()
-                    }
-                }, encoderHandler)
-                configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                this@VideoSessionManager.inputSurface = createInputSurface()
-                start()
-            }
-        } catch (e: Exception) {
-            Log.e(tag, "Failed to setup video encoder", e)
+        Log.i(tag, "Setup ${encoders.size} video encoders")
+
+        // Initialize with highest quality encoder (index 0)
+        if (encoders.isNotEmpty()) {
+            activeEncoderIndex = 0
+            encoders[0].isActive = true
+            val highestQualityConfig = encoders[0].config
+            val aspectRatio = highestQualityConfig.height.toFloat() / highestQualityConfig.width.toFloat()
+            _videoAspectRatio.value = aspectRatio
+            Log.i(
+                tag,
+                "Initialized with highest quality: ${highestQualityConfig.width}x${highestQualityConfig.height}, priority=${highestQualityConfig.priority}"
+            )
         }
     }
 
@@ -724,18 +1392,22 @@ class VideoSessionManager @Inject constructor(
 
     @Synchronized
     fun stopSession() {
-        //Unpublish self tracks
-        moqTransport.unpublishTrack(remoteVideoTrackName)
-        moqTransport.unpublishTrack(remoteAudioTrackName)
+        // Unpublish all self tracks (video tracks + audio track)
+        catalogTrackNamesUrl.forEach { trackName ->
+            Log.i(tag, "Unpublishing track: $trackName")
+            moqTransport.unpublishTrack(trackName)
+        }
 
-        //Unsubscribe from all remote tracks
+        // Unsubscribe from all remote tracks
         trackKeyToFullName.values.forEach { fullTrackName ->
             Log.i(tag, "Unsubscribing from track: $fullTrackName")
             moqTransport.unsubscribeTrack(fullTrackName)
         }
 
-        //Unsubscribe namespace
-        moqTransport.unsubscribeNamespace(localPrefix)
+        // Unsubscribe from namespace
+        if (catalogNamespacesUrl.isNotEmpty()) {
+            moqTransport.unsubscribeNamespace(catalogNamespacesUrl[0])
+        }
 
         cleanup()
     }
@@ -747,12 +1419,24 @@ class VideoSessionManager @Inject constructor(
         cameraProvider?.unbindAll()
 
         encoderHandler.removeCallbacksAndMessages(null)
-        val currentEncoder = encoder
-        encoder = null
-        try {
-            currentEncoder?.stop()
-            currentEncoder?.release()
-        } catch (e: Exception) {}
+
+        // Stop and release all encoders
+        encoders.forEach { encoderState ->
+            try {
+                encoderState.encoder.stop()
+                encoderState.encoder.release()
+                encoderState.inputSurface.release()
+                Log.d(tag, "Released encoder for ${encoderState.config.trackNameUrl}")
+            } catch (e: Exception) {
+                Log.e(tag, "Error releasing encoder for ${encoderState.config.trackNameUrl}", e)
+            }
+        }
+        encoders.clear()
+
+        // Reset encoder quality tracking
+        activeEncoderIndex = 0
+        consecutiveGoodFrames = 0
+        lastEncoderError = 0L
 
         nativeAudioLib.stopCapture()
 
@@ -777,14 +1461,14 @@ class VideoSessionManager @Inject constructor(
             }
         }
 
-        inputSurface?.release()
-        inputSurface = null
+        localPreviewSurface?.release()
+        localPreviewSurface = null
         _remoteParticipants.value = emptyList()
+        remoteParticipantStates.clear()
         encoderOutputFormat = null
 
         formatLatch.countDown()
         formatLatch = CountDownLatch(1)
-        videoFramer = null
         audioFramer = null
         videoFrameListeners.clear()
 
@@ -794,6 +1478,7 @@ class VideoSessionManager @Inject constructor(
 
     fun resetCatalog() {
         // Clear catalog state
+        moqTransport.unsubscribeTrack(moqCatalog.catalogTrackUrl)
         _isCatalogReady.value = false
         catalogVersion = 0
         catalogTracks.clear()
