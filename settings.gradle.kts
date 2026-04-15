@@ -23,5 +23,4 @@ dependencyResolutionManagement {
 rootProject.name = "Quadroid"
 include(":app")
 include(":nativeaudio")
-include(":jitterbufferlib")
 include(":moqcatalog")
