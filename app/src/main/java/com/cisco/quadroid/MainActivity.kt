@@ -107,7 +107,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.cisco.quadroid.mediacodec.ParticipantStream
+import com.cisco.quadroid.mediacodec.model.ParticipantStream
 import com.cisco.quadroid.transport.MoqConnectionStatus
 import com.cisco.quadroid.ui.components.NativeVideoRenderer
 import com.cisco.quadroid.ui.components.PreviewNativeVideoRenderer

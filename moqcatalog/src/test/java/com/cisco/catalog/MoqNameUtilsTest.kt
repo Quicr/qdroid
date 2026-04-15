@@ -121,7 +121,7 @@ class MoqNameUtilsTest {
         assertEquals("cisco.webex.com", namespaces[0])
         assertEquals("nab", namespaces[1])
         assertEquals("v1", namespaces[2])
-        assertEquals("", String(trackName)) // Empty track name
+        assertEquals("", trackName) // Empty track name
     }
 
     @Test

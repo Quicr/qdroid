@@ -3,7 +3,7 @@ package com.cisco.quadroid
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.cisco.quadroid.mediacodec.ParticipantStream
+import com.cisco.quadroid.mediacodec.model.ParticipantStream
 import com.cisco.quadroid.mediacodec.VideoSessionManager
 import com.cisco.quadroid.transport.MoqConnectionStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
