@@ -10,6 +10,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(FetchContent)
 
 set(CRYPTO "BORINGSSL" CACHE STRING "Crypto backend " FORCE)
+
+# Fetch Kairos jitter buffer library
+FetchContent_Declare(
+    kairos
+    GIT_REPOSITORY git@github.com:Quicr/kairos.git
+    GIT_TAG        main
+)
+
 # BoringSSL support (boring2 branch as requested)
 FetchContent_Declare(
     libquicr
@@ -17,6 +25,9 @@ FetchContent_Declare(
     GIT_TAG        boring2
     GIT_SUBMODULES_RECURSE TRUE
 )
+
+# Fetch Kairos jitter buffer library
+FetchContent_MakeAvailable(kairos)
 
 # Fetch libquicr but don't make available yet (so we can patch it)
 FetchContent_GetProperties(libquicr)
@@ -45,7 +56,7 @@ target_link_libraries(moq_jni
 target_include_directories(moq_jni PRIVATE
     ${libquicr_SOURCE_DIR}/include
     ${libquicr_SOURCE_DIR}/src
-    /Users/chaya/Github/kairos/api  # Kairos jitter buffer headers
+    ${kairos_SOURCE_DIR}/api  # Kairos jitter buffer headers
 )
 
 # Optimization flags for jitter buffer performance
