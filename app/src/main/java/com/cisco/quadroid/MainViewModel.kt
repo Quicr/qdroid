@@ -3,7 +3,7 @@ package com.cisco.quadroid
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.cisco.quadroid.mediacodec.ParticipantStream
+import com.cisco.quadroid.mediacodec.model.ParticipantStream
 import com.cisco.quadroid.mediacodec.VideoSessionManager
 import com.cisco.quadroid.transport.MoqConnectionStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -43,6 +43,8 @@ class MainViewModel @Inject constructor(
 
     val connectionStatus: StateFlow<MoqConnectionStatus> = videoSessionManager.connectionStatus
 
+    val isCatalogReady: StateFlow<Boolean> = videoSessionManager.isCatalogReady
+
     fun connectToRelay() {
         if (relay_url != last_connected_url || videoSessionManager.connectionStatus.value == MoqConnectionStatus.DISCONNECTED || videoSessionManager.connectionStatus.value == MoqConnectionStatus.IDLE) {
             videoSessionManager.connectToRelay(relay_url)
@@ -51,6 +53,7 @@ class MainViewModel @Inject constructor(
     }
 
     fun disconnectFromRelay() {
+        videoSessionManager.resetCatalog()
         videoSessionManager.disconnectFromRelay()
         last_connected_url = null
     }

@@ -161,4 +161,16 @@ object TrackUtil {
             "$trackNamespace/$trackName"
         }
     }
+
+    /*
+    * Helper to map trackNames to priority for publish
+     */
+    fun getTrackPriority(trackName: String): Int {
+        return when {
+            trackName.contains("1080p") -> 8
+            trackName.contains("720p") -> 6
+            trackName.contains("360p") -> 4
+            else -> 10
+        }
+    }
 }

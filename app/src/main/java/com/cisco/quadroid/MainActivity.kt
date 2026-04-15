@@ -107,7 +107,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.cisco.quadroid.mediacodec.ParticipantStream
+import com.cisco.quadroid.mediacodec.model.ParticipantStream
 import com.cisco.quadroid.transport.MoqConnectionStatus
 import com.cisco.quadroid.ui.components.NativeVideoRenderer
 import com.cisco.quadroid.ui.components.PreviewNativeVideoRenderer
@@ -167,12 +167,18 @@ class MainActivity : ComponentActivity() {
 fun MainScreen(viewModel: MainViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val remoteParticipants by viewModel.remoteParticipants.collectAsStateWithLifecycle()
+
+    // Debug logging for remote participants
+    LaunchedEffect(remoteParticipants.size) {
+        Log.i("MainActivity", "Remote participants changed: count=${remoteParticipants.size}, ids=${remoteParticipants.map { it.id }.joinToString()}")
+    }
     val isMicEnabled by viewModel.isMicEnabled.collectAsStateWithLifecycle()
     val isVideoEnabled by viewModel.isVideoEnabled.collectAsStateWithLifecycle()
     val videoToggleCount by viewModel.videoToggleCount.collectAsStateWithLifecycle()
     val isFrontCamera by viewModel.isFrontCamera.collectAsStateWithLifecycle()
     val videoAspectRatio by viewModel.videoAspectRatio.collectAsStateWithLifecycle()
     val connectionStatus by viewModel.connectionStatus.collectAsStateWithLifecycle()
+    val isCatalogReady by viewModel.isCatalogReady.collectAsStateWithLifecycle()
 
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
@@ -212,6 +218,7 @@ fun MainScreen(viewModel: MainViewModel) {
                 is CallUiState.Lobby -> {
                     LobbyScreen(
                         connectionStatus = connectionStatus,
+                        isCatalogReady = isCatalogReady,
                         onStartCall = {
                             if (permissionsState.allPermissionsGranted) {
                                 val rotation = context.display?.rotation ?: 0
@@ -402,11 +409,13 @@ fun LiquidGlassButton(
 @Composable
 fun LobbyScreen(
     connectionStatus: MoqConnectionStatus,
+    isCatalogReady: Boolean,
     onStartCall: () -> Unit,
     onNavigateToSettings: () -> Unit
 ) {
     val isConnected = connectionStatus == MoqConnectionStatus.CONNECTED
     val isConnecting = connectionStatus == MoqConnectionStatus.CONNECTING || connectionStatus == MoqConnectionStatus.IDLE
+    val canJoinMeeting = isConnected && isCatalogReady
 
     Box(
         modifier = Modifier
@@ -460,7 +469,7 @@ fun LobbyScreen(
             // 1, 4 & 5. Liquid Glass Button: Material You, Minimalistic
             LiquidGlassButton(
                 onClick = onStartCall,
-                enabled = isConnected,
+                enabled = canJoinMeeting,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Icon(
@@ -477,7 +486,7 @@ fun LobbyScreen(
             }
 
             // Revolving progress bar below button
-            if (!isConnected) {
+            if (!canJoinMeeting) {
                 Spacer(modifier = Modifier.height(32.dp))
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator(
@@ -487,7 +496,12 @@ fun LobbyScreen(
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
-                        text = if (isConnecting) "Connecting to MoQ Relay..." else "Connection failed. Retrying...",
+                        text = when {
+                            !isConnected && isConnecting -> "Connecting to MoQ Relay..."
+                            !isConnected -> "Connection failed. Retrying..."
+                            isConnected && !isCatalogReady -> "Loading catalog..."
+                            else -> "Preparing..."
+                        },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                     )
@@ -563,6 +577,11 @@ fun InCallScreen(
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
+    // Debug logging for layout decisions
+    LaunchedEffect(remoteParticipants.size) {
+        Log.i("InCallScreen", "Remote participants: ${remoteParticipants.size}, showing ${if (remoteParticipants.isEmpty()) "local preview fullscreen" else "grid + PIP"}")
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -577,6 +596,7 @@ fun InCallScreen(
         // Video Participants Grid (Layer 0)
         Box(modifier = Modifier.fillMaxSize()) {
             if (remoteParticipants.isEmpty()) {
+                Log.d("InCallScreen", "Rendering local preview fullscreen (no remote participants)")
                 if (isVideoEnabled) {
                     key(videoToggleCount) {
                         PreviewNativeVideoRenderer(
@@ -593,6 +613,7 @@ fun InCallScreen(
                     }
                 }
             } else {
+                Log.d("InCallScreen", "Rendering AdaptiveNativeGrid with ${remoteParticipants.size} participants")
                 AdaptiveNativeGrid(
                     viewModel = viewModel,
                     participants = remoteParticipants,

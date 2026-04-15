@@ -149,6 +149,9 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
         if (nativePtr != 0L) nativeUnsubscribe(nativePtr, trackName)
     }
 
+    override fun endSubgroup(trackName: String, groupId: Long, subgroupId: Long, completed: Boolean) {
+        if (nativePtr != 0L) nativeEndSubGroup(nativePtr, trackName, groupId, 0 , completed = true)
+    }
     private fun trackKey(fullName: String): String = TrackUtil.generateTrackKeyFromFullName(fullName)
 
     private external fun nativeConnect(url: String, deviceId: String): Long
@@ -173,6 +176,9 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
     private external fun nativeUnsubscribeNamespace(ptr: Long, namespacePrefix: String)
     private external fun nativeSetNamespaceDefaultBehavior(ptr: Long, acceptAll: Boolean)
     private external fun nativeUnsubscribe(ptr: Long, trackName: String)
+
+    private external fun nativeEndSubGroup(ptr: Long, trackName: String, groupId: Long, subgroupId: Long, completed: Boolean)
+
 
 
 

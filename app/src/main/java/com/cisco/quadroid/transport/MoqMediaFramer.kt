@@ -29,6 +29,7 @@ class MoqMediaFramer(
 
         if (isKeyFrame) {
             if (!firstFrame) {
+                transport.endSubgroup(trackName, currentGroupId, 0 , true)
                 currentGroupId++
             }
             currentObjectId = 0

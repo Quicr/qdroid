@@ -1,46 +1,73 @@
 package com.cisco.quadroid.mediacodec
 
 import android.content.Context
-import android.media.MediaCodec
-import android.media.MediaCodecInfo
-import android.media.MediaFormat
-import android.os.Handler
-import android.os.HandlerThread
 import android.util.Log
-import android.util.Size
 import android.view.Surface
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.Preview
-import androidx.camera.core.resolutionselector.ResolutionSelector
-import androidx.camera.core.resolutionselector.ResolutionStrategy
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
-import com.cisco.nativeaudio.NativeAudioLib
-import com.cisco.quadroid.transport.MoqAudioFramer
+import com.cisco.quadroid.mediacodec.audio.AudioManager
+import com.cisco.quadroid.mediacodec.camera.CameraManager
+import com.cisco.quadroid.mediacodec.catalog.CatalogManager
+import com.cisco.quadroid.mediacodec.catalog.VideoEncoderConfigParser
+import com.cisco.quadroid.mediacodec.encoder.VideoEncoderManager
+import com.cisco.quadroid.mediacodec.jitter.JitterBufferMonitor
+import com.cisco.quadroid.mediacodec.model.*
+import com.cisco.quadroid.mediacodec.participant.RemoteParticipantManager
 import com.cisco.quadroid.transport.MoqConnectionStatus
-import com.cisco.quadroid.transport.MoqMediaFramer
 import com.cisco.quadroid.transport.MoqNative
 import com.cisco.quadroid.transport.MoqObjectCallback
 import com.cisco.quadroid.transport.MoqTransport
 import com.cisco.quadroid.transport.NamespaceSubscriptionCallback
 import com.cisco.quadroid.transport.PublishOptions
-import com.cisco.quadroid.transport.VideoFrame
-import com.cisco.quadroid.transport.VideoJitterBufferCallback
 import com.cisco.quadroid.util.DeviceIdentifier
 import com.cisco.quadroid.util.TrackUtil
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/**
+ * Coordinates media streaming sessions using Media over QUIC (MoQ) transport.
+ *
+ * This class serves as the main coordinator for multi-quality video conferencing sessions,
+ * managing the lifecycle and interactions between specialized manager components:
+ *
+ * **Architecture:**
+ * - [CatalogManager]: Handles catalog subscription and parsing for dynamic track configuration
+ * - [VideoEncoderManager]: Manages multiple video encoders for adaptive quality streaming
+ * - [CameraManager]: Controls CameraX integration for local video capture
+ * - [AudioManager]: Manages native audio capture and encoding
+ * - [RemoteParticipantManager]: Tracks remote participants and handles adaptive quality switching
+ * - [JitterBufferMonitor]: Monitors jitter buffer statistics for audio/video tracks
+ *
+ * **Key Features:**
+ * - Multi-quality video encoding (1080p, 720p, 360p) with adaptive quality switching
+ * - Catalog-based dynamic track configuration
+ * - Namespace-based participant discovery
+ * - Jitter buffer management for smooth playback
+ * - Front/back camera switching
+ * - Audio/video mute controls
+ *
+ * **Session Lifecycle:**
+ * 1. Connect to relay server via [connectToRelay]
+ * 2. Subscribe to catalog track (automatic when connected)
+ * 3. Start session via [startSession] (publishes local tracks, discovers remote participants)
+ * 4. Handle video/audio via manager delegates
+ * 5. End session via [stopSession]
+ *
+ * **Thread Safety:**
+ * This class is a Hilt @Singleton and uses coroutines for async operations.
+ * StateFlows are exposed for UI observation on the main thread.
+ *
+ * @property context Application context for Android resources
+ * @property moqTransport MoQ transport layer for media streaming
+ */
 @Singleton
 class VideoSessionManager @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -48,509 +75,486 @@ class VideoSessionManager @Inject constructor(
 ) {
     private val tag = "VideoSessionManager"
 
-    // Video Config
-    private val videoMimeType = MediaFormat.MIMETYPE_VIDEO_AVC
-    private val width = 1280
-    private val height = 720
-    private val bitRate = 4000000
-    private val frameRate = 30
-    private val iFrameInterval = 2
+    // Coroutine scope for observing connection status
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    private val nativeAudioLib = NativeAudioLib()
-    private var isMicEnabled = true
+    // Multi-quality video encoder configuration
+    private val videoEncoderConfigs = mutableListOf<VideoEncoderConfig>()
 
-    private var cameraProvider: ProcessCameraProvider? = null
     private var lifecycleOwner: LifecycleOwner? = null
     private var rotation: Int = 0
-    private var cameraSelector: CameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
-    
-    private val _isFrontCamera = MutableStateFlow(true)
-    val isFrontCamera: StateFlow<Boolean> = _isFrontCamera.asStateFlow()
 
-    private var encoder: MediaCodec? = null
-    private var inputSurface: Surface? = null
-    private val encoderThread = HandlerThread("VideoSessionManager_Encoder").apply { start() }
-    private val encoderHandler = Handler(encoderThread.looper)
+    private val _videoAspectRatio = MutableStateFlow(9f / 16f) // Default portrait aspect ratio
 
-    // Monitoring for jitter buffer statistics
-    private val monitoringHandler = Handler(android.os.Looper.getMainLooper())
-    private var isMonitoring = false
-
-    @Volatile
-    private var encoderOutputFormat: MediaFormat? = null
-    private var formatLatch = CountDownLatch(1)
-
-    // Listeners for raw video objects
-    private val videoFrameListeners = ConcurrentHashMap<String, (ByteArray, Long) -> Unit>()
-
-    private val _remoteParticipants = MutableStateFlow<List<ParticipantStream>>(emptyList())
-    val remoteParticipants: StateFlow<List<ParticipantStream>> = _remoteParticipants.asStateFlow()
-    
-    private val _videoAspectRatio = MutableStateFlow(height.toFloat() / width.toFloat())
+    /**
+     * Current video aspect ratio for local video (height / width).
+     * Updated automatically when encoder quality changes.
+     * Default: 9/16 (portrait mode).
+     */
     val videoAspectRatio: StateFlow<Float> = _videoAspectRatio.asStateFlow()
 
-    private var localPreviewSurface: Surface? = null
-    
-    private var videoFramer: MoqMediaFramer? = null
-    private var audioFramer: MoqAudioFramer? = null
-    
     // Meeting Configuration
     private val meetingId = "meeting123"
-    private val meetingNamespace = "webex.com/$meetingId"
 
     // Each device publishes under its own unique device ID
     private val deviceId = DeviceIdentifier.get(context)
-    private val userName = "alice"
-    private val userId = "carlos"
-    private val localPrefix = "$meetingNamespace/$userName"
-    private val localVideoTrackName = "$localPrefix/video"
-    private val localAudioTrackName = "$localPrefix/audio"
-    private val remoteNamespace = "$meetingNamespace/bob"
-    private val remoteVideoTrackName = "$remoteNamespace/video"
-    private val remoteAudioTrackName = "$remoteNamespace/audio"
-    
+
+    // Catalog state management
+    private val catalogManager = CatalogManager(moqTransport, deviceId, meetingId).apply {
+        onCatalogReady = {
+            _isCatalogReady.value = true
+            parseVideoEncoderConfigs()
+        }
+    }
+
+    private val _isCatalogReady = MutableStateFlow(false)
+
+    /**
+     * Indicates whether the catalog has been successfully loaded.
+     * When true, video encoder configurations are available and encoders are setup.
+     */
+    val isCatalogReady: StateFlow<Boolean> = _isCatalogReady.asStateFlow()
+
+    // Jitter buffer monitoring
+    private val jitterBufferMonitor = JitterBufferMonitor(moqTransport)
+
+    // Audio management
+    private val audioManager = AudioManager(moqTransport)
+
+    // Camera management
+    private val cameraManager = CameraManager(context)
+
+    // Video encoder management
+    private val videoEncoderManager = VideoEncoderManager(moqTransport, context).apply {
+        onQualityChanged = { config ->
+            _videoAspectRatio.value = config.height.toFloat() / config.width.toFloat()
+
+            // Rebind camera to new encoder surface when quality switches
+            lifecycleOwner?.let { owner ->
+                activeInputSurface?.let { surface ->
+                    cameraManager.updateEncoderSurface(surface, config.width, config.height)
+                    Log.i(tag, "Camera rebound to new encoder: ${config.width}x${config.height}")
+                }
+            }
+        }
+    }
+
+    // Remote participant management
+    private val participantManager = RemoteParticipantManager(context, catalogManager)
+
+    /**
+     * Indicates whether the front camera is currently active.
+     * Use [switchCamera] to toggle between front and back cameras.
+     */
+    val isFrontCamera: StateFlow<Boolean> = cameraManager.isFrontCamera
+
+    /**
+     * List of active remote participants in the session.
+     * Each participant has their highest available quality track selected automatically.
+     * Updated dynamically as participants join/leave or quality changes.
+     */
+    val remoteParticipants: StateFlow<List<ParticipantStream>> = participantManager.remoteParticipants
+
+    /**
+     * Current connection status to the MoQ relay server.
+     * Catalog subscription begins automatically when status becomes CONNECTED.
+     */
     val connectionStatus: StateFlow<MoqConnectionStatus> = moqTransport.connectionStatus
 
+    init {
+        Log.e("QUADROID_DEBUG", "VideoSessionManager INIT - deviceId=$deviceId")
+        Log.e(tag, "⭐ VideoSessionManager initialized with deviceId=$deviceId, meetingId=$meetingId")
+
+        // Observe connection status and subscribe to catalog when connected
+        scope.launch {
+            connectionStatus.collect { status ->
+                Log.e("QUADROID_DEBUG", "Connection status: $status")
+                Log.d(tag, "Connection status changed to: $status")
+                if (status == MoqConnectionStatus.CONNECTED) {
+                    Log.i(tag, "Connection established, subscribing to catalog track")
+                    catalogManager.subscribeToCatalogTrack()
+                }
+            }
+        }
+    }
+
+    /**
+     * Establishes connection to the MoQ relay server.
+     *
+     * When connection succeeds, the catalog track is automatically subscribed.
+     * Monitor [connectionStatus] to observe connection state changes.
+     *
+     * @param url WebSocket URL of the relay server (e.g., "wss://relay.example.com")
+     */
     fun connectToRelay(url: String) {
         moqTransport.connect(url, deviceId)
     }
 
+    /**
+     * Disconnects from the MoQ relay server.
+     *
+     * This terminates the transport connection but does not clean up session state.
+     * Call [stopSession] before disconnecting to properly end the session.
+     */
     fun disconnectFromRelay() {
         moqTransport.disconnect()
     }
 
-    // Store mapping from trackKey to full track name for jitter buffer lookup
-    private val trackKeyToFullName = mutableMapOf<String, String>()
+    private fun parseVideoEncoderConfigs() {
+        videoEncoderConfigs.clear()
+        videoEncoderConfigs.addAll(
+            VideoEncoderConfigParser.parse(
+                catalogManager.catalogTracks,
+                catalogManager.catalogTrackNamesUrl
+            )
+        )
 
-    // Monitoring runnable for periodic jitter buffer statistics
-    private val monitoringRunnable = object : Runnable {
-        override fun run() {
-            if (!isMonitoring) return
-
-            val moqNative = moqTransport as? MoqNative
-            if (moqNative != null) {
-                // Monitor video jitter buffers
-                videoFrameListeners.keys.forEach { trackKey ->
-                    val fullTrackName = trackKeyToFullName[trackKey]
-                    if (fullTrackName != null) {
-                        val stats = moqNative.nativeGetVideoJitterBufferStats(fullTrackName)
-                        if (stats != null) {
-                            // Log warning if frame drop rate is significant
-                            if (stats.framesDropped > 0) {
-                                Log.w(tag, "Video Buffer [$trackKey]: recv=${stats.framesReceived}, " +
-                                    "out=${stats.framesOutput}, drop=${stats.framesDropped} " +
-                                    "(${String.format("%.1f", stats.dropRatePercent)}%), " +
-                                    "avgLat=${String.format("%.1f", stats.avgLatencyMs)}ms, " +
-                                    "maxLat=${String.format("%.1f", stats.maxLatencyMs)}ms")
-                            }
-                            // Log info periodically even if no drops
-                            else if (stats.framesOutput > 0) {
-                                Log.i(tag, "Video Buffer [$trackKey]: recv=${stats.framesReceived}, " +
-                                    "out=${stats.framesOutput}, " +
-                                    "avgLat=${String.format("%.1f", stats.avgLatencyMs)}ms")
-                            }
-                        }
-                    }
-                }
-
-                // Monitor audio jitter buffers
-                trackKeyToFullName.forEach { (trackKey, fullTrackName) ->
-                    if (fullTrackName.contains("audio")) {
-                        val stats = moqNative.nativeGetAudioJitterBufferStats(fullTrackName)
-                        if (stats != null) {
-                            // Log warning if packet drop rate is significant
-                            if (stats.packetsDropped > 0) {
-                                Log.w(tag, "Audio Buffer [$trackKey]: recv=${stats.packetsReceived}, " +
-                                    "out=${stats.packetsOutput}, drop=${stats.packetsDropped} " +
-                                    "(${String.format("%.1f", stats.dropRatePercent)}%), " +
-                                    "avgLat=${String.format("%.1f", stats.avgLatencyMs)}ms, " +
-                                    "maxLat=${String.format("%.1f", stats.maxLatencyMs)}ms")
-                            }
-                            // Log info periodically even if no drops
-                            else if (stats.packetsOutput > 0) {
-                                Log.i(tag, "Audio Buffer [$trackKey]: recv=${stats.packetsReceived}, " +
-                                    "out=${stats.packetsOutput}, " +
-                                    "avgLat=${String.format("%.1f", stats.avgLatencyMs)}ms")
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Schedule next check in 5 seconds
-            if (isMonitoring) {
-                monitoringHandler.postDelayed(this, 5000)
-            }
+        // Setup encoders with new configs
+        if (videoEncoderConfigs.isNotEmpty()) {
+            videoEncoderManager.setupEncoders(videoEncoderConfigs)
         }
     }
 
+    /**
+     * Registers a listener to receive decoded video frames for a remote participant.
+     *
+     * Creates a native jitter buffer for the specified track and routes decoded frames
+     * to the provided listener. The listener is called on the jitter buffer's native thread.
+     *
+     * @param trackKey Unique identifier for the remote participant's video track
+     * @param listener Callback receiving (frameData: ByteArray, timestampUs: Long)
+     */
     fun addVideoFrameListener(trackKey: String, listener: (ByteArray, Long) -> Unit) {
-        Log.d(tag, "addVideoFrameListener for $trackKey")
-        videoFrameListeners[trackKey] = listener
-
-        // Create native jitter buffer for this track using full track name
-        val moqNative = moqTransport as? MoqNative
-        if (moqNative != null) {
-            // Get full track name for jitter buffer lookup in C++
-            val fullTrackName = trackKeyToFullName[trackKey]
-            if (fullTrackName == null) {
-                Log.w(tag, "No full track name found for trackKey $trackKey, jitter buffer not created")
-                return
-            }
-
-            val callback = object : VideoJitterBufferCallback {
-                override fun onFramesReady(trackName: String, frames: Array<VideoFrame>) {
-                    val frameListener = videoFrameListeners[trackKey] ?: return
-
-                    for (frame in frames) {
-                        // Pass frames to decoder
-                        // shouldRender flag is informational - we pass all frames to maintain decoder state
-                        frameListener(frame.data, frame.ptsUs)
-                    }
-
-                    // Log periodically for monitoring
-                    if (frames.isNotEmpty() && frames[0].objectId % 100 == 0L) {
-                        Log.v(tag, "[$trackKey] Delivered ${frames.size} frames from jitter buffer")
-                    }
-                }
-            }
-
-            // Use full track name (not hashed key) for C++ jitter buffer lookup
-            moqNative.nativeCreateVideoJitterBuffer(fullTrackName, callback)
-            Log.i(tag, "Created jitter buffer for track $trackKey (fullName: $fullTrackName)")
-        } else {
-            Log.w(tag, "MoqTransport is not MoqNative, jitter buffer not available")
-        }
+        jitterBufferMonitor.addVideoFrameListener(trackKey, listener)
     }
 
+    /**
+     * Removes the video frame listener for a remote participant.
+     *
+     * Destroys the associated native jitter buffer and stops frame delivery.
+     *
+     * @param trackKey Unique identifier for the remote participant's video track
+     */
     fun removeVideoFrameListener(trackKey: String) {
-        Log.d(tag, "removeVideoFrameListener for $trackKey")
-
-        // Destroy native jitter buffer using full track name
-        val moqNative = moqTransport as? MoqNative
-        val fullTrackName = trackKeyToFullName[trackKey]
-        if (fullTrackName != null) {
-            moqNative?.nativeDestroyVideoJitterBuffer(fullTrackName)
-            // Don't remove mapping - keep it for when renderer is recreated
-            // The mapping will be cleared when the session ends in cleanup()
-        }
-
-        videoFrameListeners.remove(trackKey)
+        jitterBufferMonitor.removeVideoFrameListener(trackKey)
     }
 
     private fun startJitterBufferMonitoring() {
-        if (!isMonitoring) {
-            isMonitoring = true
-            monitoringHandler.postDelayed(monitoringRunnable, 5000) // Start after 5 seconds
-            Log.d(tag, "Started jitter buffer monitoring")
-        }
+        jitterBufferMonitor.startMonitoring()
     }
 
     private fun stopJitterBufferMonitoring() {
-        if (isMonitoring) {
-            isMonitoring = false
-            monitoringHandler.removeCallbacks(monitoringRunnable)
-            Log.d(tag, "Stopped jitter buffer monitoring")
-        }
+        jitterBufferMonitor.stopMonitoring()
     }
 
+    /**
+     * Starts a new media streaming session.
+     *
+     * This method orchestrates the complete session setup:
+     * 1. Connects to relay if not already connected
+     * 2. Subscribes to meeting namespace for participant discovery
+     * 3. Publishes local video tracks (multi-quality) and audio track
+     * 4. Starts camera capture and audio encoding
+     * 5. Begins jitter buffer monitoring
+     *
+     * Remote participants discovered via namespace subscription are automatically
+     * added to [remoteParticipants] with adaptive quality selection.
+     *
+     * **Prerequisites:**
+     * - Catalog must be loaded ([isCatalogReady] == true)
+     * - Connection must be established or will be initiated automatically
+     *
+     * @param lifecycleOwner Android lifecycle owner for camera binding
+     * @param rotation Screen rotation in degrees (0, 90, 180, 270) for camera orientation
+     * @param relayUrl WebSocket URL of the relay server
+     */
     fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String) {
-        // Save existing track mappings before cleanup (for rejoin scenario)
-        val savedTrackMappings = trackKeyToFullName.toMap()
+        Log.e("QUADROID_DEBUG", "╔════════════════════════════════════════╗")
+        Log.e("QUADROID_DEBUG", "║    START SESSION CALLED               ║")
+        Log.e("QUADROID_DEBUG", "╚════════════════════════════════════════╝")
+        Log.e(tag, "⭐ startSession: relayUrl=$relayUrl, deviceId=$deviceId")
 
         cleanup()
 
-        // Restore track mappings after cleanup (allows rejoin to work when remote tracks
-        // were already published - relay doesn't replay PUBLISH messages on resubscribe)
-        trackKeyToFullName.putAll(savedTrackMappings)
-
         Log.i(tag, "Starting session with deviceId: $deviceId")
-        Log.i(tag, "Local tracks: video=$localVideoTrackName, audio=$localAudioTrackName")
-        if (savedTrackMappings.isNotEmpty()) {
-            Log.i(tag, "Restored ${savedTrackMappings.size} track mappings from previous session (rejoin)")
-
-            // Resubscribe to tracks that were in the previous session
-            // This is needed because we unsubscribed from them in stopSession()
-            savedTrackMappings.forEach { (trackKey, fullTrackName) ->
-                val callback = moqTransport.trackCallbacks[trackKey]
-                if (callback != null) {
-                    Log.i(tag, "Resubscribing to track on rejoin: $fullTrackName")
-                    moqTransport.subscribe(fullTrackName, callback)
-
-                    // Recreate audio jitter buffer if this is an audio track
-                    if (fullTrackName.contains("audio")) {
-                        val moqNative = moqTransport as? MoqNative
-                        moqNative?.nativeCreateAudioJitterBuffer(fullTrackName, trackKey)
-                        Log.i(tag, "Recreated audio jitter buffer for track $trackKey (fullName: $fullTrackName)")
-                    }
-
-                    // Recreate video jitter buffer if this is a video track
-                    // Must create BEFORE packets arrive to avoid "No jitter buffer found" error
-                    if (fullTrackName.contains("video")) {
-                        val moqNative = moqTransport as? MoqNative
-                        if (moqNative != null) {
-                            // Create jitter buffer with callback (will be used when UI listener registers)
-                            val jitterBufferCallback = object : VideoJitterBufferCallback {
-                                override fun onFramesReady(trackName: String, frames: Array<VideoFrame>) {
-                                    val frameListener = videoFrameListeners[trackKey]
-                                    if (frameListener != null) {
-                                        for (frame in frames) {
-                                            frameListener(frame.data, frame.ptsUs)
-                                        }
-                                    } else {
-                                        // UI hasn't registered listener yet - buffer the frames
-                                        Log.v(tag, "[$trackKey] Dropping ${frames.size} frames - no UI listener yet")
-                                    }
-                                }
-                            }
-                            moqNative.nativeCreateVideoJitterBuffer(fullTrackName, jitterBufferCallback)
-                            Log.i(tag, "Recreated video jitter buffer for track $trackKey (fullName: $fullTrackName)")
-                        }
-
-                        // Restore remote participant to trigger UI rendering
-                        addRemoteParticipant(trackKey)
-                    }
-                } else {
-                    Log.w(tag, "No callback found for track $trackKey, cannot resubscribe")
-                }
-            }
-        }
+        Log.i(tag, "Local tracks from catalog: ${catalogManager.catalogTrackNamesUrl.joinToString(", ")}")
 
         this.lifecycleOwner = lifecycleOwner
         this.rotation = rotation
-        formatLatch = CountDownLatch(1)
-        cameraSelector = CameraSelector.DEFAULT_FRONT_CAMERA
-        _isFrontCamera.value = true
+
+        // Recreate encoders if they were destroyed during cleanup
+        if (videoEncoderConfigs.isNotEmpty() && videoEncoderManager.activeInputSurface == null) {
+            Log.i(tag, "Recreating encoders after cleanup")
+            videoEncoderManager.setupEncoders(videoEncoderConfigs)
+        }
+
+        // Setup camera with active encoder surface
+        videoEncoderManager.activeInputSurface?.let { surface ->
+            videoEncoderManager.activeConfig?.let { config ->
+                cameraManager.setupCamera(lifecycleOwner, surface, config.width, config.height, rotation)
+                Log.i(tag, "Camera setup initiated with ${config.width}x${config.height}")
+            }
+        } ?: Log.e(tag, "Cannot setup camera - no active encoder surface available")
 
         if (moqTransport.connectionStatus.value != MoqConnectionStatus.CONNECTED) {
             connectToRelay(relayUrl)
         }
 
         // Subscribe to meeting namespace to discover all participants
-        Log.i(tag, "Subscribing to namespace: $localPrefix")
-        moqTransport.subscribeNamespace(localPrefix, object : NamespaceSubscriptionCallback {
+        // Extract common parent namespace to cover all quality levels
+        // From cisco.webex.com/nab/v1/avc1/1080 -> cisco.webex.com/nab/v1
+        val subscriptionNamespace = if (catalogManager.catalogNamespacesUrl.isNotEmpty()) {
+            val firstNamespace = catalogManager.catalogNamespacesUrl[0]
+            // Remove the last two levels (codec type and quality) to get common parent
+            val parts = firstNamespace.split("/")
+            if (parts.size >= 2) {
+                parts.dropLast(2).joinToString("/")
+            } else {
+                firstNamespace
+            }
+        } else {
+            "webex.com/$meetingId" // Fallback if catalog not available
+        }
+
+        Log.e("QUADROID_DEBUG", "⭐ Subscribing to namespace: $subscriptionNamespace")
+        Log.i(tag, "Subscribing to namespace: $subscriptionNamespace (covers all quality levels)")
+        moqTransport.subscribeNamespace(subscriptionNamespace, object : NamespaceSubscriptionCallback {
             override fun onMatch(trackName: String): Boolean {
-                if (trackName == remoteVideoTrackName || trackName == remoteAudioTrackName) {
+                Log.e("QUADROID_DEBUG", "🔍 onMatch called for track: $trackName")
+
+                if (catalogManager.catalogTrackNamesUrl.contains(trackName)) {
+                    Log.e("QUADROID_DEBUG", "❌ Ignoring own track: $trackName")
                     Log.d(tag, "Ignoring own track: $trackName")
                     return false
                 }
-                
-                Log.i(tag, "Track Discovered: $trackName")
+
+                Log.e("QUADROID_DEBUG", "✅ REMOTE TRACK DISCOVERED: $trackName")
+                Log.i(tag, "========== Track Discovered: $trackName ==========")
                 val trackKey = TrackUtil.generateTrackKeyFromFullName(trackName)
+                Log.e("QUADROID_DEBUG", "🔑 Generated trackKey: $trackKey")
+                Log.i(tag, "Generated trackKey: $trackKey")
 
                 // Store mapping for jitter buffer lookup in C++
-                trackKeyToFullName[trackKey] = trackName
+                jitterBufferMonitor.registerTrack(trackKey, trackName)
+
+                // Extract participant ID from namespace (last tuple before track name)
+                val participantId = participantManager.extractParticipantId(trackName)
+                Log.i(tag, "Extracted participant ID: $participantId from track: $trackName")
+
+                // Find matching track in catalog to get media properties
+                val catalogTrack = participantManager.findCatalogTrackByName(trackName)
+                if (catalogTrack != null) {
+                    Log.i(tag, "Found catalog track: name=${catalogTrack.name}, role=${catalogTrack.role}, codec=${catalogTrack.codec}, ${catalogTrack.width}x${catalogTrack.height}")
+                } else {
+                    Log.w(tag, "No catalog track found for: $trackName")
+                }
 
                 if (trackName.contains("audio")) {
-                    Log.i(tag, "Discovered audio track: $trackName")
+                    Log.i(tag, "Discovered audio track: $trackName for participant: $participantId")
 
                     // Create native audio jitter buffer
-                    // The jitter buffer will create its own NativeAudioLib instance and call startPlayback()
                     val moqNative = moqTransport as? MoqNative
                     moqNative?.nativeCreateAudioJitterBuffer(trackName, trackKey)
-                    Log.i(tag, "Created audio jitter buffer for track $trackKey (fullName: $trackName)")
+                    Log.i(tag, "Created audio jitter buffer for track $trackKey")
+
+                    // Associate audio track with participant
+                    participantManager.setAudioTrack(participantId, trackKey)
+                } else if (trackName.contains("video")) {
+                    Log.i(tag, "Discovered video track: $trackName for participant: $participantId")
+
+                    // Get display dimensions and priority from catalog track (or use defaults)
+                    val displayWidth: Int
+                    val displayHeight: Int
+                    val priority: Int
+
+                    if (catalogTrack != null) {
+                        displayWidth = catalogTrack.displayWidth ?: catalogTrack.width ?: 1280
+                        displayHeight = catalogTrack.displayHeight ?: catalogTrack.height ?: 720
+                        priority = when {
+                            (catalogTrack.height ?: 720) >= 1080 -> 1
+                            (catalogTrack.height ?: 720) >= 720 -> 2
+                            else -> 3
+                        }
+                        Log.i(tag, "Using catalog dimensions: ${displayWidth}x${displayHeight}")
+                    } else {
+                        // Fallback: Try to infer quality from track name
+                        Log.w(tag, "No catalog track found, inferring from track name")
+                        when {
+                            trackName.contains("1080") -> {
+                                displayWidth = 1920
+                                displayHeight = 1080
+                                priority = 1
+                            }
+                            trackName.contains("720") -> {
+                                displayWidth = 1280
+                                displayHeight = 720
+                                priority = 2
+                            }
+                            trackName.contains("360") -> {
+                                displayWidth = 640
+                                displayHeight = 360
+                                priority = 3
+                            }
+                            else -> {
+                                // Default to 720p if we can't determine
+                                displayWidth = 1280
+                                displayHeight = 720
+                                priority = 2
+                                Log.w(tag, "Could not determine quality, using 720p default")
+                            }
+                        }
+                    }
+
+                    val remoteTrack = RemoteVideoTrack(
+                        trackKey = trackKey,
+                        fullTrackName = trackName,
+                        priority = priority,
+                        displayWidth = displayWidth,
+                        displayHeight = displayHeight
+                    )
+
+                    // Add track to participant manager
+                    participantManager.addVideoTrack(participantId, remoteTrack)
+
+                    // Jitter buffer will be created when UI adds a video frame listener
+
+                    // Trigger initial UI update immediately (don't wait for objects)
+                    // Objects go directly to jitter buffer in C++, bypassing Kotlin callback
+                    Log.e("QUADROID_DEBUG", "🎬 Triggering initial track selection for $participantId")
+                    participantManager.handleRemoteVideoObject(participantId, trackKey, 0)
                 }
 
+                // Note: onObject callback is bypassed when jitter buffers exist
+                // Objects go directly from C++ to jitter buffer
                 moqTransport.trackCallbacks[trackKey] = object : MoqObjectCallback {
                     override fun onObject(trackName: String, groupId: Long, objectId: Long, payload: ByteBuffer) {
-                        if (trackName == remoteVideoTrackName || trackName == remoteAudioTrackName) {
-                            Log.d(tag, "Ignoring own track: $trackName")
-                            return
+                        // This callback is NOT called when jitter buffers exist
+                        // Keeping it for compatibility but it won't be invoked for video
+                        if (!catalogManager.catalogTrackNamesUrl.contains(trackName) && trackName.contains("video")) {
+                            Log.d(tag, "onObject called for $trackName (unexpected with jitter buffer)")
                         }
-
-                        // Both video and audio are now routed directly to jitter buffers in C++
-                        // This callback only triggers UI updates
-                        if (trackName.contains("video")) {
-                            // Video routing happens in AndroidSubscribeTrackHandler::ObjectReceived() in C++
-                            addRemoteParticipant(trackKey)
-                        }
-                        // Audio packets now route through jitter buffer in C++ - no callback needed
                     }
                 }
-                
+
                 return true
             }
         })
 
 
         // Publish our tracks
-        Log.i(tag, "Publishing tracks: $remoteVideoTrackName, $remoteAudioTrackName")
-        moqTransport.publish(remoteVideoTrackName)
-        videoFramer = MoqMediaFramer(moqTransport, remoteVideoTrackName)
+        for (catalogTrackName in catalogManager.catalogTrackNamesUrl) {
+            Log.i(tag, "Publishing tracks: $catalogTrackName")
+            if (catalogTrackName.contains("video")) {
+                moqTransport.publish(catalogTrackName, PublishOptions(TrackUtil.getTrackPriority(catalogTrackName), false))
+            } else if (catalogTrackName.contains("audio")) {
+                moqTransport.publish(catalogTrackName, PublishOptions(1, true))
+            }
+        }
 
-        moqTransport.publish(remoteAudioTrackName, PublishOptions(3, true))
-        audioFramer = MoqAudioFramer(moqTransport, remoteAudioTrackName)
+        // Encoders are already setup via parseVideoEncoderConfigs()
+        // Camera will be setup via onEncoderReady callback
 
-
-        setupEncoder()
-        setupCamera(lifecycleOwner)
-        startNativeAudio()
+        // Start audio capture for audio tracks
+        catalogManager.catalogTrackNamesUrl.forEach { trackName ->
+            if (trackName.contains("audio")) {
+                audioManager.startCapture(trackName)
+            }
+        }
 
         // Start periodic jitter buffer monitoring
         startJitterBufferMonitoring()
     }
 
-    private fun startNativeAudio() {
-        var callbackCount = 0
-        nativeAudioLib.startCapture(object : NativeAudioLib.NativeAudioCallback {
-            override fun onAudioEncoded(payload: ByteBuffer, size: Int, presentationTimeUs: Long, flags: Int) {
-                callbackCount++
-                if (callbackCount % 10 == 0) {
-                    Log.d(tag, "onAudioEncoded callback #$callbackCount, size=$size, flags=$flags, micEnabled=$isMicEnabled, framerExists=${audioFramer != null}")
-                }
-                if (isMicEnabled) {
-                    val info = MediaCodec.BufferInfo()
-                    info.set(0, size, presentationTimeUs, flags)
-                    audioFramer?.processFrame(payload, info)
-                }
-            }
-        })
-    }
-
-    private fun addRemoteParticipant(trackKey: String) {
-        if (_remoteParticipants.value.any { it.id == trackKey }) {
-            return
-        }
-        
-        Handler(context.mainLooper).post {
-            if (!_remoteParticipants.value.any { it.id == trackKey }) {
-                val stream = ParticipantStream(trackKey)
-                _remoteParticipants.value = _remoteParticipants.value + stream
-                Log.i(tag, "Added remote participant: $trackKey. List size: ${_remoteParticipants.value.size}")
-            }
-        }
-    }
-
-    private fun setupCamera(owner: LifecycleOwner) {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
-        cameraProviderFuture.addListener({
-            try {
-                cameraProvider = cameraProviderFuture.get()
-                bindCameraUseCases(owner)
-            } catch (e: Exception) {
-                Log.e(tag, "Failed to get camera provider", e)
-            }
-        }, ContextCompat.getMainExecutor(context))
-    }
-
-    private fun bindCameraUseCases(owner: LifecycleOwner) {
-        val provider = cameraProvider ?: return
-        provider.unbindAll()
-
-        val resolutionSelector = ResolutionSelector.Builder()
-            .setResolutionStrategy(ResolutionStrategy(Size(width, height), ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
-            .build()
-
-        val encoderPreview = Preview.Builder()
-            .setTargetRotation(rotation)
-            .setResolutionSelector(resolutionSelector)
-            .build().apply {
-                setSurfaceProvider { request ->
-                    inputSurface?.let { 
-                        request.provideSurface(it, ContextCompat.getMainExecutor(context)) {} 
-                    }
-                }
-            }
-
-        val localUiPreview = Preview.Builder()
-            .setTargetRotation(rotation)
-            .setResolutionSelector(resolutionSelector)
-            .build()
-            
-        localPreviewSurface?.let { surface ->
-            localUiPreview.setSurfaceProvider { request ->
-                request.provideSurface(surface, ContextCompat.getMainExecutor(context)) {}
-            }
-        }
-        
-        try {
-            if (localPreviewSurface != null) {
-                provider.bindToLifecycle(owner, cameraSelector, encoderPreview, localUiPreview)
-            } else {
-                provider.bindToLifecycle(owner, cameraSelector, encoderPreview)
-            }
-        } catch (exc: Exception) {
-            Log.e(tag, "Use case binding failed", exc)
-        }
-    }
-
+    /**
+     * Toggles between front and back camera.
+     *
+     * Camera switch is applied immediately. Monitor [isFrontCamera] to observe the current state.
+     *
+     * @param owner Lifecycle owner for camera rebinding
+     */
     fun switchCamera(owner: LifecycleOwner) {
-        cameraSelector = if (cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA) {
-            _isFrontCamera.value = false
-            CameraSelector.DEFAULT_BACK_CAMERA
-        } else {
-            _isFrontCamera.value = true
-            CameraSelector.DEFAULT_FRONT_CAMERA
-        }
-        bindCameraUseCases(owner)
+        cameraManager.switchCamera()
     }
 
+    /**
+     * Sets the surface for local video preview.
+     *
+     * The local preview allows the user to see their own camera feed.
+     * This should be called before or after [startSession] to display local video.
+     *
+     * @param surface Surface from SurfaceView or TextureView for preview rendering
+     */
     fun setLocalPreviewSurface(surface: Surface) {
-        localPreviewSurface = surface
-        lifecycleOwner?.let { bindCameraUseCases(it) }
+        cameraManager.setLocalPreviewSurface(surface)
     }
 
-    private fun setupEncoder() {
-        val format = MediaFormat.createVideoFormat(videoMimeType, width, height).apply {
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
-            setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
-            // Prepend SPS/PPS to keyframes for easier decoding by late-joiners
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                setInteger(MediaFormat.KEY_PREPEND_HEADER_TO_SYNC_FRAMES, 1)
-            }
-        }
-
-        try {
-            encoder = MediaCodec.createEncoderByType(videoMimeType).apply {
-                setCallback(object : MediaCodec.Callback() {
-                    override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {}
-                    override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
-                        try {
-                            getOutputBuffer(index)?.let { buffer ->
-                                if (info.size > 0) {
-                                    videoFramer?.processFrame(buffer, info)
-                                }
-                            }
-                            releaseOutputBuffer(index, false)
-                        } catch (e: IllegalStateException) {}
-                    }
-                    override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) { Log.e(tag, "Encoder Error", e) }
-                    override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
-                        encoderOutputFormat = format
-                        formatLatch.countDown()
-                    }
-                }, encoderHandler)
-                configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                this@VideoSessionManager.inputSurface = createInputSurface()
-                start()
-            }
-        } catch (e: Exception) {
-            Log.e(tag, "Failed to setup video encoder", e)
-        }
-    }
-
+    /**
+     * Enables or disables local video transmission.
+     *
+     * When enabled, camera capture resumes and video frames are published.
+     * When disabled, camera is unbound and no video is sent.
+     *
+     * @param enabled True to enable video, false to disable
+     * @param owner Lifecycle owner for camera binding
+     */
     fun enableVideo(enabled: Boolean, owner: LifecycleOwner) {
-        if (enabled) bindCameraUseCases(owner) else cameraProvider?.unbindAll()
+        if (enabled) {
+            videoEncoderManager.activeInputSurface?.let { surface ->
+                videoEncoderManager.activeConfig?.let { config ->
+                    cameraManager.setupCamera(
+                        owner,
+                        surface,
+                        config.width,
+                        config.height,
+                        rotation
+                    )
+                }
+            }
+        } else {
+            cameraManager.unbindAll()
+        }
     }
-    
-    fun enableAudio(enabled: Boolean) { isMicEnabled = enabled }
 
+    /**
+     * Enables or disables microphone for audio transmission.
+     *
+     * When disabled, audio frames are still captured but not published to the network.
+     * This provides instant mute/unmute without stopping the audio encoder.
+     *
+     * @param enabled True to enable microphone, false to mute
+     */
+    fun enableAudio(enabled: Boolean) {
+        audioManager.enableMicrophone(enabled)
+    }
+
+    /**
+     * Stops the current media streaming session.
+     *
+     * This method performs complete cleanup:
+     * 1. Unpublishes all local tracks (video + audio)
+     * 2. Unsubscribes from meeting namespace
+     * 3. Stops camera, encoders, and audio capture
+     * 4. Clears jitter buffers and remote participants
+     * 5. Stops jitter buffer monitoring
+     *
+     * The connection to the relay remains active. Call [disconnectFromRelay] to close it.
+     *
+     * **Thread Safety:** This method is synchronized to prevent concurrent cleanup.
+     */
     @Synchronized
     fun stopSession() {
-        //Unpublish self tracks
-        moqTransport.unpublishTrack(remoteVideoTrackName)
-        moqTransport.unpublishTrack(remoteAudioTrackName)
-
-        //Unsubscribe from all remote tracks
-        trackKeyToFullName.values.forEach { fullTrackName ->
-            Log.i(tag, "Unsubscribing from track: $fullTrackName")
-            moqTransport.unsubscribeTrack(fullTrackName)
+        // Unpublish all self tracks (video tracks + audio track)
+        catalogManager.catalogTrackNamesUrl.forEach { trackName ->
+            Log.i(tag, "Unpublishing track: $trackName")
+            moqTransport.unpublishTrack(trackName)
         }
 
-        //Unsubscribe namespace
-        moqTransport.unsubscribeNamespace(localPrefix)
+        // Note: Remote tracks are unsubscribed via namespace unsubscribe below
+
+        // Unsubscribe from namespace
+        if (catalogManager.catalogNamespacesUrl.isNotEmpty()) {
+            moqTransport.unsubscribeNamespace(catalogManager.catalogNamespacesUrl[0])
+        }
 
         cleanup()
     }
@@ -559,53 +563,28 @@ class VideoSessionManager @Inject constructor(
         // Stop jitter buffer monitoring first
         stopJitterBufferMonitoring()
 
-        cameraProvider?.unbindAll()
+        cameraManager.cleanup()
 
-        encoderHandler.removeCallbacksAndMessages(null)
-        val currentEncoder = encoder
-        encoder = null
-        try {
-            currentEncoder?.stop()
-            currentEncoder?.release()
-        } catch (e: Exception) {}
+        videoEncoderManager.cleanup()
 
-        nativeAudioLib.stopCapture()
+        audioManager.stopCapture()
 
-        // Destroy all jitter buffers (video and audio) before clearing listeners
-        val moqNative = moqTransport as? MoqNative
-        if (moqNative != null) {
-            // Destroy video jitter buffers
-            videoFrameListeners.keys.forEach { trackKey ->
-                val fullTrackName = trackKeyToFullName[trackKey]
-                if (fullTrackName != null) {
-                    moqNative.nativeDestroyVideoJitterBuffer(fullTrackName)
-                    Log.d(tag, "Destroyed video jitter buffer for track $trackKey (fullName: $fullTrackName)")
-                }
-            }
+        // Clear jitter buffers
+        jitterBufferMonitor.clear()
 
-            // Destroy audio jitter buffers
-            trackKeyToFullName.forEach { (trackKey, fullTrackName) ->
-                if (fullTrackName.contains("audio")) {
-                    moqNative.nativeDestroyAudioJitterBuffer(fullTrackName)
-                    Log.d(tag, "Destroyed audio jitter buffer for track $trackKey (fullName: $fullTrackName)")
-                }
-            }
-        }
+        // Clear remote participants
+        participantManager.clear()
+    }
 
-        inputSurface?.release()
-        inputSurface = null
-        _remoteParticipants.value = emptyList()
-        encoderOutputFormat = null
-
-        formatLatch.countDown()
-        formatLatch = CountDownLatch(1)
-        videoFramer = null
-        audioFramer = null
-        videoFrameListeners.clear()
-        // DON'T clear trackKeyToFullName - it must persist across session stop/start cycles
-        // for rejoin scenarios. Without this mapping, we can't recreate jitter buffers.
-        // trackKeyToFullName.clear()
+    /**
+     * Resets catalog state for re-subscription.
+     *
+     * This clears the current catalog data and marks [isCatalogReady] as false.
+     * Use this when the catalog needs to be reloaded (e.g., after connection loss).
+     * Catalog will be automatically resubscribed when connection is re-established.
+     */
+    fun resetCatalog() {
+        catalogManager.reset()
+        _isCatalogReady.value = false
     }
 }
-
-data class ParticipantStream(val id: String, val aspectRatio: Float = 16f / 9f)
