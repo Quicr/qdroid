@@ -11,6 +11,7 @@
 #include "moq_util.h"
 #include "video_jitter_buffer.h"
 #include "audio_jitter_buffer.h"
+#include "loc_wrapper.h"
 
 #define LOG_TAG "MoqJni"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -210,15 +211,31 @@ public:
         track_name_str += "/";
         track_name_str += std::string(ftn.name.begin(), ftn.name.end());
 
+        // Unwrap LOC container
+        LocUnwrapResult locResult = LocWrapper::unwrap(data.data(), data.size());
+
+        if (!locResult.success) {
+            LOGW("LOC unwrap failed for %s: %s",
+                 track_name_str.c_str(), locResult.errorMessage.c_str());
+        }
+
+        // Use unwrapped data or fall back to original
+        const uint8_t* payload_data = locResult.success ?
+            locResult.payload.data() : data.data();
+        size_t payload_size = locResult.success ?
+            locResult.payload.size() : data.size();
+
         // Check if this is a video track - route to jitter buffer
         if (track_name_str.find("video") != std::string::npos) {
             LOGI("Video track detected: %s", track_name_str.c_str());
             auto& manager = VideoJitterBufferManager::getInstance();
             if (auto* buffer = manager.getBuffer(track_name_str)) {
                 // Video frame goes directly to jitter buffer (C++ optimization)
-                bool isKeyframe = (hdr.object_id == 0);
+                // Use LOC metadata if available, otherwise derive from MoQ headers
+                bool isKeyframe = locResult.success ?
+                    locResult.metadata.isKeyframe : (hdr.object_id == 0);
                 buffer->addFrame(hdr.group_id, hdr.object_id,
-                               data.data(), data.size(), isKeyframe);
+                               payload_data, payload_size, isKeyframe);
                 return;  // Don't call Kotlin callback for video
             } else {
                 LOGW("No jitter buffer found for video track: %s", track_name_str.c_str());
@@ -233,7 +250,7 @@ public:
             if (auto* buffer = manager.getBuffer(track_name_str)) {
                 // Audio packet goes directly to jitter buffer (C++ optimization)
                 buffer->addPacket(hdr.group_id, hdr.object_id,
-                                data.data(), data.size());
+                                payload_data, payload_size);
                 return;  // Don't call Kotlin callback for audio
             } else {
                 LOGW("No jitter buffer found for audio track: %s", track_name_str.c_str());
@@ -254,9 +271,9 @@ public:
             detach = true;
         }
 
-        // Create DirectByteBuffer from data
-        void* data_ptr = const_cast<uint8_t*>(data.data());
-        jobject buffer = env->NewDirectByteBuffer(data_ptr, data.size());
+        // Create DirectByteBuffer from unwrapped data
+        void* data_ptr = const_cast<uint8_t*>(payload_data);
+        jobject buffer = env->NewDirectByteBuffer(data_ptr, payload_size);
 
         if (!buffer) {
             LOGE("Failed to create DirectByteBuffer");
@@ -785,6 +802,30 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
         return;
     }
 
+    // Prepare LOC metadata
+    LocMetadata locMeta;
+    locMeta.groupId = static_cast<uint64_t>(group_id);
+    locMeta.objectId = static_cast<uint32_t>(object_id);
+    locMeta.captureTimestampUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+
+    // Determine media type from track name
+    if (name.find("video") != std::string::npos) {
+        locMeta.mediaType = MediaType::Video;
+        locMeta.isKeyframe = (object_id == 0);  // Object 0 is keyframe
+    } else if (name.find("audio") != std::string::npos) {
+        locMeta.mediaType = MediaType::Audio;
+        locMeta.isKeyframe = false;
+    } else {
+        // Default to video
+        locMeta.mediaType = MediaType::Video;
+        locMeta.isKeyframe = false;
+    }
+
+    // Wrap codec data with LOC
+    std::vector<uint8_t> locWrappedData = LocWrapper::wrap(data, payload_size, locMeta);
+
     std::optional<uint32_t> ttl_opt;
     if (delivery_timeout_ms > 0) {
         ttl_opt = static_cast<uint32_t>(delivery_timeout_ms);
@@ -794,7 +835,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
         .group_id = static_cast<uint64_t>(group_id),
         .object_id = static_cast<uint64_t>(object_id),
         .subgroup_id = 0,
-        .payload_length = static_cast<uint64_t>(payload_size),
+        .payload_length = static_cast<uint64_t>(locWrappedData.size()),  // Use LOC-wrapped size
         .status = quicr::ObjectStatus::kAvailable,
         .priority = static_cast<uint8_t>(priority),
         .ttl = ttl_opt,
@@ -804,7 +845,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
     };
 
     try {
-        quicr::BytesSpan data_span(data, payload_size);
+        quicr::BytesSpan data_span(locWrappedData.data(), locWrappedData.size());  // Use LOC-wrapped data
         auto status = handler->PublishObject(headers, data_span);
 
         if (status != quicr::PublishTrackHandler::PublishObjectStatus::kOk) {
