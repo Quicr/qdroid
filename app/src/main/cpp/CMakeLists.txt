@@ -26,6 +26,12 @@ FetchContent_Declare(
     GIT_SUBMODULES_RECURSE TRUE
 )
 
+# Disable tests, benchmarks, and examples for Kairos to avoid cross-compilation execution errors
+set(BUILD_TESTING OFF CACHE BOOL "Disable Kairos tests" FORCE)
+set(KAIROS_BUILD_TESTS OFF CACHE BOOL "Disable Kairos tests" FORCE)
+set(KAIROS_BUILD_BENCHMARKS OFF CACHE BOOL "Disable Kairos benchmarks" FORCE)
+set(KAIROS_BUILD_EXAMPLES OFF CACHE BOOL "Disable Kairos examples" FORCE)
+
 # Fetch Kairos jitter buffer library
 FetchContent_MakeAvailable(kairos)
 
