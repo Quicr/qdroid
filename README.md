@@ -20,69 +20,6 @@ QDroid is a cutting-edge Android video conferencing application that leverages t
 - 🎨 **Native Video Rendering** - Hardware-accelerated video decoding with MediaCodec
 
 ---
-
-## 🏗️ Architecture
-
-QDroid follows **Clean Architecture** principles with a clear separation of concerns:
-
-```
-┌─────────────────────────────────────────┐
-│           UI Layer (Compose)            │
-└────────────────┬────────────────────────┘
-                 │
-┌────────────────▼────────────────────────┐
-│        Presentation Layer (VM)          │
-└────────────────┬────────────────────────┘
-                 │
-┌────────────────▼────────────────────────┐
-│          Domain Layer                   │
-└────────────────┬────────────────────────┘
-                 │
-┌────────────────▼────────────────────────┐
-│          Data/Native Layer              │
-└─────────────────────────────────────────┘
-```
-
----
-
-## 🛠️ Tech Stack
-
-### Frontend
-- **Jetpack Compose** - Modern declarative UI framework
-- **Material 3** - Latest Material Design components with dynamic theming
-- **Compose Navigation** - Type-safe navigation between screens
-- **Accompanist Permissions** - Runtime permission handling
-
-### Android Framework
-- **CameraX** - Camera lifecycle management and capture
-- **MediaCodec** - Hardware video encoding/decoding (H.264)
-- **Hilt** - Dependency injection
-- **Kotlin Coroutines & Flow** - Asynchronous programming and reactive state management
-- **ViewModel** - Lifecycle-aware state management
-- **AndroidX Lifecycle** - Lifecycle-aware components
-
-### Native Layer (C++)
-- **libquicr** - MoQ protocol implementation (QUIC-based media transport)
-- **BoringSSL** - Cryptographic operations for QUIC
-- **Oboe** - High-performance audio I/O library
-- **CMake** - Native build system
-- **JNI** - Java/Kotlin to C++ bridge
-
-### Media Processing
-- **H.264** - Video codec with hardware acceleration
-- **Opus** - High-quality audio codec
-- **NAL Unit Parser** - H.264 bitstream parsing
-- **SPS/PPS Parser** - Video configuration parsing
-
-### Testing
-- **JUnit** - Unit testing framework
-- **MockK** - Kotlin mocking library
-- **Turbine** - Flow testing library
-- **Espresso** - UI testing framework
-- **Compose UI Test** - Composable testing
-
----
-
 ## 🚀 Getting Started
 
 ### Prerequisites
@@ -97,10 +34,6 @@ QDroid follows **Clean Architecture** principles with a clear separation of conc
 ### Installation
 
 1. **Clone the repository**
-   ```bash
-   git clone https://github.com/your-org/quadroid.git
-   cd quadroid
-   ```
 
 2. **Open in Android Studio**
    - Launch Android Studio
@@ -140,52 +73,6 @@ Configure the MoQ relay server in the app settings:
 
 ---
 
-## 🧪 Testing
-
-QDroid includes comprehensive test coverage across multiple layers:
-
-### Unit Tests
-
-Located in `app/src/test/`:
-
-```bash
-# Run all unit tests
-./gradlew test
-
-# Run with coverage
-./gradlew testDebugUnitTest jacocoTestReport
-```
-
-### Instrumented Tests
-
-Located in `app/src/androidTest/`:
-
-```bash
-# Run on connected device/emulator
-./gradlew connectedAndroidTest
-```
-
-**Testing Tools:**
-- Espresso for UI interaction testing
-- Compose UI Test for Composable testing
-- MockK Android for Android-specific mocking
-
-### Running Specific Tests
-
-```bash
-# Run specific test class
-./gradlew test --tests "com.cisco.quadroid.MainViewModelTest"
-
-# Run specific test method
-./gradlew test --tests "com.cisco.quadroid.MainViewModelTest.testStartCall"
-
-# Run instrumented tests on specific device
-adb devices  # Get device ID
-./gradlew connectedAndroidTest -Pandroid.testInstrumentationRunnerArguments.device=<DEVICE_ID>
-```
-
----
-
 ## 🔧 Build Configuration
 
 ### Gradle Modules
@@ -200,14 +87,6 @@ The native layer is built using CMake with the following components:
 - **libquicr**: Fetched from GitHub (boring2 branch)
 - **BoringSSL**: Crypto backend for QUIC
 - **Oboe**: Low-latency audio I/O
-
-Native build is triggered automatically during Gradle sync:
-
-```bash
-# Force native rebuild
-./gradlew clean
-./gradlew externalNativeBuildDebug
-```
 
 ---
 
@@ -240,10 +119,5 @@ For questions or support, please open an issue on GitHub.
 - [libquicr](https://github.com/Quicr/libquicr) - MoQ protocol implementation
 - [Google Oboe](https://github.com/google/oboe) - High-performance audio
 - [Jetpack Compose](https://developer.android.com/jetpack/compose) - Modern UI toolkit
-- [Material 3](https://m3.material.io/) - Design system
 
 ---
-
-<div align="center">
-  <strong>Built with ❤️ using Kotlin and Jetpack Compose</strong>
-</div>
