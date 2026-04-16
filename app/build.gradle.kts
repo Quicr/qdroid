@@ -102,6 +102,9 @@ dependencies {
     // moqcatalog submodule
     implementation(project(":moqcatalog"))
 
+    // Voice Activity Detection
+    implementation("com.github.gkonovalov.android-vad:webrtc:2.0.10")
+
     // Testing
     testImplementation(libs.junit)
     testImplementation(libs.mockk)

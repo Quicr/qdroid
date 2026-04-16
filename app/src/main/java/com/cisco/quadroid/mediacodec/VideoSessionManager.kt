@@ -119,7 +119,7 @@ class VideoSessionManager @Inject constructor(
     private val jitterBufferMonitor = JitterBufferMonitor(moqTransport)
 
     // Audio management
-    private val audioManager = AudioManager(moqTransport)
+    private val audioManager = AudioManager(moqTransport, context)
 
     // Camera management
     private val cameraManager = CameraManager(context)
@@ -525,6 +525,18 @@ class VideoSessionManager @Inject constructor(
      */
     fun enableAudio(enabled: Boolean) {
         audioManager.enableMicrophone(enabled)
+    }
+
+    /**
+     * Enables or disables Voice Activity Detection (VAD).
+     *
+     * When enabled, audio frames without speech are automatically dropped to reduce bandwidth.
+     * When disabled, all audio frames are transmitted regardless of speech presence.
+     *
+     * @param enabled True to enable VAD, false to disable
+     */
+    fun setVadEnabled(enabled: Boolean) {
+        audioManager.setVadEnabled(enabled)
     }
 
     /**
