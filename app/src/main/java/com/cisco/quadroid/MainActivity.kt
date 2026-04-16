@@ -250,6 +250,7 @@ fun MainScreen(viewModel: MainViewModel) {
                 }
                 is CallUiState.Settings -> {
                     SettingsScreen(
+                        viewModel = viewModel,
                         relayUrl = viewModel.relay_url,
                         onRelayUrlChange = { viewModel.relay_url = it },
                         onSave = { viewModel.saveSettings() }
@@ -828,20 +829,26 @@ fun AdaptiveNativeGrid(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
+    viewModel: MainViewModel,
     relayUrl: String,
     onRelayUrlChange: (String) -> Unit,
     onSave: () -> Unit
 ) {
+    val context = LocalContext.current
+
     val predefinedUrls = listOf(
         "moq://eng-1.us-west-2.m10x.org:33440",
         "moq://eng-3.us-west-2.m10x.org:33550",
         "moq://eng-3.us-west-2.m10x.org:33660",
         "moq://relay.us-west-2.m10x.org:33437"
     )
-    
+
     var expanded by remember { mutableStateOf(false) }
     var isCustomUrl by remember { mutableStateOf(!predefinedUrls.contains(relayUrl)) }
     var customUrlText by remember { mutableStateOf(if (isCustomUrl) relayUrl else "") }
+
+    // Load VAD preference from SharedPreferences
+    var vadEnabled by remember { mutableStateOf(com.cisco.quadroid.util.PreferencesManager.getVadEnabled(context)) }
 
     Scaffold(
         topBar = {
@@ -917,15 +924,26 @@ fun SettingsScreen(
                 }
             }
 
-            SettingsCardSection(header = "Settings 2") {
-                OutlinedTextField(
-                    value = "",
-                    onValueChange = { },
+            SettingsCardSection(header = "Preferences") {
+                Row(
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    label = { Text("Meeting ID") }
-                )
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Voice Activity Detection")
+                    Switch(
+                        checked = vadEnabled,
+                        onCheckedChange = { enabled ->
+                            vadEnabled = enabled
+                            // Save to preferences
+                            com.cisco.quadroid.util.PreferencesManager.setVadEnabled(context, enabled)
+                            // Apply to audio manager
+                            viewModel.setVadEnabled(enabled)
+                        }
+                    )
+                }
             }
-
+            
             SettingsCardSection(header = "Connection") {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -937,21 +955,6 @@ fun SettingsScreen(
                         Text("Server-Relay")
                     }
                 }
-            }
-
-            SettingsCardSection(header = "Preferences") {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("Noise Cancellation")
-                    Switch(checked = true, onCheckedChange = { })
-                }
-            }
-
-            Button(onClick = onSave, modifier = Modifier.fillMaxWidth().height(56.dp)) {
-                Text("Save")
             }
         }
     }

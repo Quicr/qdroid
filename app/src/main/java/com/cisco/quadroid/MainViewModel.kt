@@ -112,6 +112,10 @@ class MainViewModel @Inject constructor(
         // Trigger reconnect if URL changed in settings
         connectToRelay()
     }
+
+    fun setVadEnabled(enabled: Boolean) {
+        videoSessionManager.setVadEnabled(enabled)
+    }
 }
 
 sealed class CallUiState {
