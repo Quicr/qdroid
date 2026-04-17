@@ -85,6 +85,10 @@ dependencies {
     // Permissions
     implementation(libs.accompanist.permissions)
 
+    // Coil for image loading (SVG support)
+    implementation("io.coil-kt:coil-compose:2.5.0")
+    implementation("io.coil-kt:coil-svg:2.5.0")
+
     // CameraX
     implementation(libs.androidx.camera.core)
     implementation(libs.androidx.camera.compose)
@@ -104,6 +108,11 @@ dependencies {
 
     // Voice Activity Detection
     implementation("com.github.gkonovalov.android-vad:webrtc:2.0.10")
+
+    // Coil for Compose
+    implementation(libs.coil.compose)
+    // Required for SvgDecoder used in your AutoSlidingBanner
+    implementation(libs.coil.svg)
 
     // Testing
     testImplementation(libs.junit)
