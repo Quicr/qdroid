@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -45,10 +46,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.CloudQueue
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
@@ -89,7 +94,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -97,8 +105,11 @@ import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -106,7 +117,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil.compose.AsyncImage
+import coil.decode.SvgDecoder
+import coil.request.ImageRequest
 import com.cisco.quadroid.mediacodec.model.ParticipantStream
 import com.cisco.quadroid.transport.MoqConnectionStatus
 import com.cisco.quadroid.ui.components.NativeVideoRenderer
@@ -129,6 +146,9 @@ class MainActivity : ComponentActivity() {
 
         // Initialize/Restore Device ID
         DeviceIdentifier.get(this)
+
+        // Load relay URL from preferences
+        viewModel.relay_url = com.cisco.quadroid.util.PreferencesManager.getRelayUrl(this)
 
         // 8.1 OnCreate - Connect to relay
         viewModel.connectToRelay()
@@ -249,10 +269,14 @@ fun MainScreen(viewModel: MainViewModel) {
                     )
                 }
                 is CallUiState.Settings -> {
+                    val settingsContext = LocalContext.current
                     SettingsScreen(
                         viewModel = viewModel,
                         relayUrl = viewModel.relay_url,
-                        onRelayUrlChange = { viewModel.relay_url = it },
+                        onRelayUrlChange = {
+                            viewModel.relay_url = it
+                            com.cisco.quadroid.util.PreferencesManager.setRelayUrl(settingsContext, it)
+                        },
                         onSave = { viewModel.saveSettings() }
                     )
                 }
@@ -408,6 +432,84 @@ fun LiquidGlassButton(
 }
 
 @Composable
+fun AutoSlidingBanner(
+    modifier: Modifier = Modifier,
+    slideDurationMillis: Long = 3000
+) {
+    val context = LocalContext.current
+    val logoFiles = remember {
+        listOf(
+            "openmoq.svg",
+            "cdn77.svg",
+            "cisco.svg",
+            "download.svg",
+            "synamedia.svg"
+        )
+    }
+
+    var currentIndex by remember { mutableStateOf(0) }
+
+    // Auto-slide effect
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(slideDurationMillis)
+            currentIndex = (currentIndex + 1) % logoFiles.size
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .height(60.dp)
+            .fillMaxWidth(),
+        contentAlignment = Alignment.Center
+    ) {
+        logoFiles.forEachIndexed { index, logoFile ->
+            val visible = index == currentIndex
+            androidx.compose.animation.AnimatedVisibility(
+                visible = visible,
+                enter = fadeIn(animationSpec = tween(800)),
+                exit = fadeOut(animationSpec = tween(800))
+            ) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data("file:///android_asset/logos/$logoFile")
+                        .decoderFactory(SvgDecoder.Factory())
+                        .build(),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .height(50.dp)
+                        .padding(horizontal = 32.dp)
+                        .drawBehind {
+                            drawIntoCanvas { canvas ->
+                                val paint = Paint()
+                                val frameworkPaint = paint.asFrameworkPaint()
+                                // The blur radius for the shadow
+                                frameworkPaint.maskFilter = android.graphics.BlurMaskFilter(
+                                    20f, // Blur amount
+                                    android.graphics.BlurMaskFilter.Blur.NORMAL
+                                )
+                                frameworkPaint.color = Color.Black.copy(alpha = 0.1f).toArgb()
+
+                                // Draw a rounded rect shadow that is slightly smaller than the container
+                                canvas.drawRoundRect(
+                                    left = 10f,
+                                    top = 10f,
+                                    right = size.width - 10f,
+                                    bottom = size.height - 10f,
+                                    radiusX = 8.dp.toPx(),
+                                    radiusY = 8.dp.toPx(),
+                                    paint = paint
+                                )
+                            }
+                        }
+                        .padding(8.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
 fun LobbyScreen(
     connectionStatus: MoqConnectionStatus,
     isCatalogReady: Boolean,
@@ -509,6 +611,14 @@ fun LobbyScreen(
                 }
             }
         }
+
+        // Auto-sliding logo banner at bottom center
+        AutoSlidingBanner(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = 16.dp)
+        )
     }
 }
 
@@ -637,7 +747,10 @@ fun InCallScreen(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(if (isLandscape) 160.dp else 120.dp, if (isLandscape) 90.dp else 180.dp)
+                        .size(
+                            if (isLandscape) 160.dp else 120.dp,
+                            if (isLandscape) 90.dp else 180.dp
+                        )
                         .clip(RoundedCornerShape(24.dp))
                         .border(1.dp, Color.White.copy(alpha = 0.4f), RoundedCornerShape(24.dp))
                         .background(Color.Black.copy(alpha = 0.2f))
@@ -673,7 +786,7 @@ fun InCallScreen(
 
         // Floating Control Bar
         AnimatedVisibility(
-            visible = showControls,
+            visible = true,
             enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
             exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
             modifier = Modifier
@@ -747,7 +860,9 @@ fun AdaptiveNativeGrid(
         Row(modifier = Modifier.fillMaxSize()) {
             participants.forEach { participant ->
                 key(participant.id) {
-                    Box(modifier = Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                    Box(modifier = Modifier
+                        .weight(1f)
+                        .fillMaxHeight(), contentAlignment = Alignment.Center) {
                         NativeVideoRenderer(
                             trackKey = participant.id,
                             viewModel = viewModel,
@@ -776,7 +891,9 @@ fun AdaptiveNativeGrid(
                 2 -> {
                     participants.forEach { participant ->
                         key(participant.id) {
-                            Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            Box(modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(), contentAlignment = Alignment.Center) {
                                 NativeVideoRenderer(
                                     trackKey = participant.id,
                                     viewModel = viewModel,
@@ -788,7 +905,9 @@ fun AdaptiveNativeGrid(
                     }
                 }
                 else -> {
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Box(modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(), contentAlignment = Alignment.Center) {
                         key(participants[0].id) {
                             NativeVideoRenderer(
                                 trackKey = participants[0].id,
@@ -798,8 +917,12 @@ fun AdaptiveNativeGrid(
                             )
                         }
                     }
-                    Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        Box(modifier = Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                    Row(modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()) {
+                        Box(modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight(), contentAlignment = Alignment.Center) {
                             key(participants[1].id) {
                                 NativeVideoRenderer(
                                     trackKey = participants[1].id,
@@ -809,7 +932,9 @@ fun AdaptiveNativeGrid(
                                 )
                             }
                         }
-                        Box(modifier = Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
+                        Box(modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight(), contentAlignment = Alignment.Center) {
                             key(participants[2].id) {
                                 NativeVideoRenderer(
                                     trackKey = participants[2].id,
@@ -819,6 +944,229 @@ fun AdaptiveNativeGrid(
                                 )
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Data class for relay URL sections
+data class RelaySection(
+    val title: String,
+    val urls: List<String>
+)
+
+@Composable
+fun ExpandableRelaySection(
+    section: RelaySection,
+    selectedUrl: String,
+    onUrlSelected: (String) -> Unit
+) {
+    // Expand section if it contains the selected URL
+    val containsSelectedUrl = section.urls.contains(selectedUrl)
+    var expanded by remember(containsSelectedUrl) { mutableStateOf(containsSelectedUrl) }
+
+    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+        // Section header
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded },
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = section.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Icon(
+                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+
+        // URLs list (shown when expanded)
+        AnimatedVisibility(visible = expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 8.dp, top = 4.dp, bottom = 4.dp)
+            ) {
+                section.urls.forEach { url ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(
+                                onClick = { onUrlSelected(url) },
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() }
+                            )
+                            .padding(vertical = 8.dp, horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = selectedUrl == url,
+                            onClick = { onUrlSelected(url) }
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = url,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (selectedUrl == url) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            fontWeight = if (selectedUrl == url) FontWeight.Bold else FontWeight.Normal
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ExpandableCustomUrlSection(
+    customUrls: List<String>,
+    selectedUrl: String,
+    onUrlSelected: (String) -> Unit,
+    onAddUrl: (String) -> Unit,
+    onDeleteUrl: (String) -> Unit
+) {
+    val hasCustomUrls = customUrls.isNotEmpty()
+    val containsSelectedUrl = customUrls.contains(selectedUrl)
+    var expanded by remember(containsSelectedUrl) { mutableStateOf(containsSelectedUrl || hasCustomUrls) }
+    var newUrlText by remember { mutableStateOf("") }
+
+    Column(modifier = Modifier.padding(vertical = 4.dp)) {
+        // Section header
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded },
+            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Custom Relay URL",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Icon(
+                    imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = if (expanded) "Collapse" else "Expand",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+
+        // Custom URLs list and add input (shown when expanded)
+        AnimatedVisibility(visible = expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 8.dp, top = 4.dp, end = 8.dp, bottom = 4.dp)
+            ) {
+                // Display existing custom URLs
+                customUrls.forEach { url ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(
+                                onClick = { onUrlSelected(url) },
+                                indication = null,
+                                interactionSource = remember { MutableInteractionSource() }
+                            )
+                            .padding(vertical = 8.dp, horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = selectedUrl == url,
+                            onClick = { onUrlSelected(url) }
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = url,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (selectedUrl == url) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            fontWeight = if (selectedUrl == url) FontWeight.Bold else FontWeight.Normal,
+                            modifier = Modifier.weight(1f)
+                        )
+                        IconButton(
+                            onClick = { onDeleteUrl(url) },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Delete,
+                                contentDescription = "Delete",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+
+                // Add new custom URL input
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = newUrlText,
+                        onValueChange = { newUrlText = it },
+                        modifier = Modifier.weight(1f),
+                        label = { Text("Add Custom URL") },
+                        placeholder = { Text("moq://...") },
+                        singleLine = true
+                    )
+                    IconButton(
+                        onClick = {
+                            if (newUrlText.isNotBlank()) {
+                                onAddUrl(newUrlText)
+                                onUrlSelected(newUrlText)
+                                newUrlText = ""
+                            }
+                        },
+                        modifier = Modifier.size(48.dp),
+                        colors = IconButtonDefaults.iconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "Add",
+                            modifier = Modifier.size(24.dp)
+                        )
                     }
                 }
             }
@@ -836,16 +1184,41 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
 
-    val predefinedUrls = listOf(
-        "moq://eng-1.us-west-2.m10x.org:33440",
-        "moq://eng-3.us-west-2.m10x.org:33550",
-        "moq://eng-3.us-west-2.m10x.org:33660",
-        "moq://relay.us-west-2.m10x.org:33437"
-    )
+    // Use local state to track the selected URL for immediate UI updates
+    var selectedRelayUrl by remember { mutableStateOf(relayUrl) }
 
-    var expanded by remember { mutableStateOf(false) }
-    var isCustomUrl by remember { mutableStateOf(!predefinedUrls.contains(relayUrl)) }
-    var customUrlText by remember { mutableStateOf(if (isCustomUrl) relayUrl else "") }
+    // Load custom URLs from preferences
+    var customUrls by remember { mutableStateOf(com.cisco.quadroid.util.PreferencesManager.getCustomRelayUrls(context)) }
+
+    // Define relay sections
+    val relaySections = listOf(
+        RelaySection(
+            title = "LAPS",
+            urls = listOf(
+                "moq://eng-1.us-west-2.m10x.org:33440",
+                "moq://eng-3.us-west-2.m10x.org:33550",
+                "moq://eng-3.us-west-2.m10x.org:33660",
+                "moq://relay.us-west-2.m10x.org:33437"
+            )
+        ),
+        RelaySection(
+            title = "NAB_CISCO",
+            urls = listOf(
+                "moq://lax1.cisco.moqx.akaleapi.net:9667/",
+                "moq://lax1.cisco.moqx.akaleapi.net:9668/",
+                "moq://lax2.cisco.moqx.akaleapi.net:9667/",
+                "moq://lax2.cisco.moqx.akaleapi.net:9668/"
+            )
+        ),
+        RelaySection(
+            title = "DEV",
+            urls = listOf("moq://suhas-build-vm.akaleapi.net:443/moq-relay")
+        ),
+        RelaySection(
+            title = "CLOUDFARE",
+            urls = listOf("moq://cisco-nab.cloudflare.mediaoverquic.com")
+        )
+    )
 
     // Load VAD preference from SharedPreferences
     var vadEnabled by remember { mutableStateOf(com.cisco.quadroid.util.PreferencesManager.getVadEnabled(context)) }
@@ -871,62 +1244,44 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             SettingsCardSection(header = "Relay URL") {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    ExposedDropdownMenuBox(
-                        expanded = expanded,
-                        onExpandedChange = { expanded = !expanded }
-                    ) {
-                        OutlinedTextField(
-                            value = if (isCustomUrl) "Custom URL" else relayUrl,
-                            onValueChange = {},
-                            readOnly = true,
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                            modifier = Modifier.menuAnchor().fillMaxWidth(),
-                            label = { Text("Select Relay") }
-                        )
-                        ExposedDropdownMenu(
-                            expanded = expanded,
-                            onDismissRequest = { expanded = false }
-                        ) {
-                            predefinedUrls.forEach { url ->
-                                DropdownMenuItem(
-                                    text = { Text(url) },
-                                    onClick = {
-                                        onRelayUrlChange(url)
-                                        isCustomUrl = false
-                                        expanded = false
-                                    }
-                                )
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Display all sections
+                    relaySections.forEach { section ->
+                        ExpandableRelaySection(
+                            section = section,
+                            selectedUrl = selectedRelayUrl,
+                            onUrlSelected = { url ->
+                                selectedRelayUrl = url
+                                onRelayUrlChange(url)
                             }
-                            DropdownMenuItem(
-                                text = { Text("Custom URL...") },
-                                onClick = {
-                                    isCustomUrl = true
-                                    expanded = false
-                                }
-                            )
-                        }
+                        )
                     }
 
-                    if (isCustomUrl) {
-                        Spacer(modifier = Modifier.height(16.dp))
-                        OutlinedTextField(
-                            value = customUrlText,
-                            onValueChange = {
-                                customUrlText = it
-                                onRelayUrlChange(it)
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            label = { Text("Enter Custom Relay URL") },
-                            placeholder = { Text("moq://...") }
-                        )
-                    }
+                    // Custom URL Section
+                    ExpandableCustomUrlSection(
+                        customUrls = customUrls,
+                        selectedUrl = selectedRelayUrl,
+                        onUrlSelected = { url ->
+                            selectedRelayUrl = url
+                            onRelayUrlChange(url)
+                        },
+                        onAddUrl = { url ->
+                            com.cisco.quadroid.util.PreferencesManager.addCustomRelayUrl(context, url)
+                            customUrls = com.cisco.quadroid.util.PreferencesManager.getCustomRelayUrls(context)
+                        },
+                        onDeleteUrl = { url ->
+                            com.cisco.quadroid.util.PreferencesManager.removeCustomRelayUrl(context, url)
+                            customUrls = com.cisco.quadroid.util.PreferencesManager.getCustomRelayUrls(context)
+                        }
+                    )
                 }
             }
 
             SettingsCardSection(header = "Preferences") {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(16.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
