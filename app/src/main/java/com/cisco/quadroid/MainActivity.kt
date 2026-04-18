@@ -24,7 +24,9 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -437,14 +439,26 @@ fun AutoSlidingBanner(
     slideDurationMillis: Long = 3000
 ) {
     val context = LocalContext.current
-    val logoFiles = remember {
-        listOf(
-            "openmoq.svg",
-            "cdn77.svg",
-            "cisco.svg",
-            "download.svg",
-            "synamedia.svg"
-        )
+
+    // Determine if Cloudflare should be shown
+    val cloudflareOverride = com.cisco.quadroid.util.PreferencesManager.getCloudflareOverride(context)
+    val showCloudflare = com.cisco.quadroid.BuildConfig.ENABLE_CLOUDFLARE || cloudflareOverride
+
+    val logoFiles = remember(showCloudflare) {
+        if (showCloudflare) {
+            listOf(
+                "cisco.svg",
+                "cloudflare.svg"
+            )
+        } else {
+            listOf(
+                "openmoq.svg",
+                "cdn77.svg",
+                "cisco.svg",
+                "download.svg",
+                "synamedia.svg"
+            )
+        }
     }
 
     var currentIndex by remember { mutableStateOf(0) }
@@ -1174,7 +1188,7 @@ fun ExpandableCustomUrlSection(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun SettingsScreen(
     viewModel: MainViewModel,
@@ -1198,7 +1212,9 @@ fun SettingsScreen(
                 "moq://eng-1.us-west-2.m10x.org:33440",
                 "moq://eng-3.us-west-2.m10x.org:33550",
                 "moq://eng-3.us-west-2.m10x.org:33660",
-                "moq://relay.us-west-2.m10x.org:33437"
+                "moq://relay.us-west-2.m10x.org:33437",
+                "moq://relay.us-east-2.m10x.org:33437",
+                "moq://relay.eu-west-2.m10x.org:33437"
             )
         ),
         RelaySection(
@@ -1215,13 +1231,16 @@ fun SettingsScreen(
             urls = listOf("moq://suhas-build-vm.akaleapi.net:443/moq-relay")
         ),
         RelaySection(
-            title = "CLOUDFARE",
+            title = "CLOUDFLARE",
             urls = listOf("moq://cisco-nab.cloudflare.mediaoverquic.com")
         )
     )
 
     // Load VAD preference from SharedPreferences
     var vadEnabled by remember { mutableStateOf(com.cisco.quadroid.util.PreferencesManager.getVadEnabled(context)) }
+
+    // Developer mode state
+    var developerMode by remember { mutableStateOf(com.cisco.quadroid.util.PreferencesManager.getDeveloperMode(context)) }
 
     Scaffold(
         topBar = {
@@ -1243,10 +1262,21 @@ fun SettingsScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // Cloudflare override state (only relevant in developer mode)
+            var cloudflareOverride by remember { mutableStateOf(com.cisco.quadroid.util.PreferencesManager.getCloudflareOverride(context)) }
+
+            // Determine if Cloudflare should be shown
+            val showCloudflare = com.cisco.quadroid.BuildConfig.ENABLE_CLOUDFLARE || cloudflareOverride
+
+            // Filter relay sections based on Cloudflare flag
+            val filteredRelaySections = relaySections.filter { section ->
+                section.title != "CLOUDFLARE" || showCloudflare
+            }
+
             SettingsCardSection(header = "Relay URL") {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    // Display all sections
-                    relaySections.forEach { section ->
+                    // Display filtered sections
+                    filteredRelaySections.forEach { section ->
                         ExpandableRelaySection(
                             section = section,
                             selectedUrl = selectedRelayUrl,
@@ -1278,36 +1308,118 @@ fun SettingsScreen(
             }
 
             SettingsCardSection(header = "Preferences") {
-                Row(
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Voice Activity Detection")
+                        Switch(
+                            checked = vadEnabled,
+                            onCheckedChange = { enabled ->
+                                vadEnabled = enabled
+                                // Save to preferences
+                                com.cisco.quadroid.util.PreferencesManager.setVadEnabled(context, enabled)
+                                // Apply to audio manager
+                                viewModel.setVadEnabled(enabled)
+                            }
+                        )
+                    }
+
+                    // Cloudflare toggle (only shown in developer mode)
+                    if (developerMode) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp)
+                                .padding(bottom = 16.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Enable Cloudflare Relay")
+                                Text(
+                                    text = "Developer Option",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                                )
+                            }
+                            Switch(
+                                checked = cloudflareOverride,
+                                onCheckedChange = { enabled ->
+                                    cloudflareOverride = enabled
+                                    com.cisco.quadroid.util.PreferencesManager.setCloudflareOverride(context, enabled)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            SettingsCardSection(header = "About") {
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text("Voice Activity Detection")
-                    Switch(
-                        checked = vadEnabled,
-                        onCheckedChange = { enabled ->
-                            vadEnabled = enabled
-                            // Save to preferences
-                            com.cisco.quadroid.util.PreferencesManager.setVadEnabled(context, enabled)
-                            // Apply to audio manager
-                            viewModel.setVadEnabled(enabled)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .combinedClickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                                onClick = { },
+                                onLongClick = {
+                                    developerMode = !developerMode
+                                    com.cisco.quadroid.util.PreferencesManager.setDeveloperMode(context, developerMode)
+
+                                    // When disabling dev mode, also disable Cloudflare override
+                                    if (!developerMode) {
+                                        cloudflareOverride = false
+                                        com.cisco.quadroid.util.PreferencesManager.setCloudflareOverride(context, false)
+                                    }
+                                }
+                            ),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Version",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.SansSerif
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = com.cisco.quadroid.BuildConfig.VERSION_NAME,
+                                style = MaterialTheme.typography.bodyMedium.copy(
+                                    fontSize = 14.sp
+                                ),
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.SansSerif
+                            )
+                            // Show DEV badge when developer mode is enabled
+                            if (developerMode) {
+                                Text(
+                                    text = "DEV",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier
+                                        .background(
+                                            MaterialTheme.colorScheme.primary.copy(alpha = 0.1f),
+                                            RoundedCornerShape(4.dp)
+                                        )
+                                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
                         }
-                    )
-                }
-            }
-            
-            SettingsCardSection(header = "Connection") {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(selected = true, onClick = { })
-                        Text("Peer-to-Peer")
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(selected = false, onClick = { })
-                        Text("Server-Relay")
                     }
                 }
             }

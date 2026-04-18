@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.hilt)
     alias(libs.plugins.ksp)
+    alias(libs.plugins.google.services)
 }
 
 android {
@@ -18,6 +19,9 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Cloudflare relay feature flag
+        buildConfigField("Boolean", "ENABLE_CLOUDFLARE", "false")
         
         externalNativeBuild {
             cmake {
@@ -50,6 +54,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     externalNativeBuild {
         cmake {
@@ -114,6 +119,8 @@ dependencies {
     // Required for SvgDecoder used in your AutoSlidingBanner
     implementation(libs.coil.svg)
 
+    //firebase
+    implementation(platform(libs.firebase))
     // Testing
     testImplementation(libs.junit)
     testImplementation(libs.mockk)

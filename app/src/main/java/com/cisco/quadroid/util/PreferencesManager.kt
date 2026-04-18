@@ -11,6 +11,8 @@ object PreferencesManager {
     private const val KEY_VAD_ENABLED = "vad_enabled"
     private const val KEY_RELAY_URL = "relay_url"
     private const val KEY_CUSTOM_RELAY_URLS = "custom_relay_urls"
+    private const val KEY_DEVELOPER_MODE = "developer_mode"
+    private const val KEY_CLOUDFLARE_OVERRIDE = "cloudflare_override"
 
     /**
      * Gets the VAD (Voice Activity Detection) enabled state from preferences.
@@ -112,5 +114,51 @@ object PreferencesManager {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val urlsString = urls.joinToString("|||")
         prefs.edit().putString(KEY_CUSTOM_RELAY_URLS, urlsString).apply()
+    }
+
+    /**
+     * Gets the developer mode state from preferences.
+     * Defaults to false if not set.
+     *
+     * @param context The context used to access SharedPreferences.
+     * @return True if developer mode is enabled, false otherwise.
+     */
+    fun getDeveloperMode(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_DEVELOPER_MODE, false)
+    }
+
+    /**
+     * Saves the developer mode state to preferences.
+     *
+     * @param context The context used to access SharedPreferences.
+     * @param enabled True to enable developer mode, false to disable.
+     */
+    fun setDeveloperMode(context: Context, enabled: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(KEY_DEVELOPER_MODE, enabled).apply()
+    }
+
+    /**
+     * Gets the Cloudflare override state from preferences.
+     * Defaults to false if not set.
+     *
+     * @param context The context used to access SharedPreferences.
+     * @return True if Cloudflare override is enabled, false otherwise.
+     */
+    fun getCloudflareOverride(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_CLOUDFLARE_OVERRIDE, false)
+    }
+
+    /**
+     * Saves the Cloudflare override state to preferences.
+     *
+     * @param context The context used to access SharedPreferences.
+     * @param enabled True to enable Cloudflare override, false to disable.
+     */
+    fun setCloudflareOverride(context: Context, enabled: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(KEY_CLOUDFLARE_OVERRIDE, enabled).apply()
     }
 }

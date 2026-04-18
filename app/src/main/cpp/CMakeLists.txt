@@ -28,7 +28,7 @@ FetchContent_Declare(
 # BoringSSL support (boring2 branch as requested)
 FetchContent_Declare(
     libquicr
-    GIT_REPOSITORY https://github.com/Quicr/libquicr.git
+    GIT_REPOSITORY git@github.com:Quicr/libquicr.git
     GIT_TAG        boring2
     GIT_SUBMODULES_RECURSE TRUE
 )
