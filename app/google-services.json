@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "506603279838",
+    "project_id": "cisco-beam",
+    "storage_bucket": "cisco-beam.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:506603279838:android:028cd18e4e80f53136f94f",
+        "android_client_info": {
+          "package_name": "com.cisco.beam"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCQapNg82oINGYqGicXZGdvzqWD8ute6xo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:506603279838:android:b0135ff90e1d97ca36f94f",
+        "android_client_info": {
+          "package_name": "com.cisco.quadroid"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCQapNg82oINGYqGicXZGdvzqWD8ute6xo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
