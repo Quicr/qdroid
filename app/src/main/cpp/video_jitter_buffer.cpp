@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 Cisco Systems
+// SPDX-License-Identifier: BSD-2-Clause
+
 #include "video_jitter_buffer.h"
 #include <kairos/kairos.hpp>
 #include <android/log.h>

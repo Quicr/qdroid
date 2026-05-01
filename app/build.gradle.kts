@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 Cisco Systems
+// SPDX-License-Identifier: BSD-2-Clause
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)

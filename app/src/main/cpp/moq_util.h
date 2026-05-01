@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 Cisco Systems
+// SPDX-License-Identifier: BSD-2-Clause
+
 #ifndef MOQ_UTIL_H
 #define MOQ_UTIL_H
 
