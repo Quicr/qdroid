@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-FileCopyrightText: Copyright (c) 2025 Cisco Systems -->
+<!-- SPDX-License-Identifier: BSD-2-Clause -->
 <resources>
 
     <style name="Theme.Quadroid" parent="android:Theme.Material.Light.NoActionBar" />

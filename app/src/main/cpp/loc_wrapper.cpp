@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 Cisco Systems
+// SPDX-License-Identifier: BSD-2-Clause
+
 #include "loc_wrapper.h"
 #include <android/log.h>
 #include <cstring>
