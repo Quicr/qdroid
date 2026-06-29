@@ -4,6 +4,7 @@
 package com.cisco.quadroid
 
 import android.Manifest
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Bundle
 import android.util.Log
@@ -11,6 +12,7 @@ import android.view.Surface
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -67,6 +69,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -87,6 +90,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -115,9 +119,11 @@ import androidx.compose.ui.graphics.drawOutline
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -131,6 +137,10 @@ import coil.decode.SvgDecoder
 import coil.request.ImageRequest
 import com.cisco.quadroid.mediacodec.model.ParticipantStream
 import com.cisco.quadroid.transport.MoqConnectionStatus
+import com.cisco.quadroid.CameraSource
+import com.meta.wearable.dat.core.types.PermissionStatus
+import com.meta.wearable.dat.core.types.RegistrationState
+import com.meta.wearable.dat.core.Wearables
 import com.cisco.quadroid.ui.components.NativeVideoRenderer
 import com.cisco.quadroid.ui.components.PreviewNativeVideoRenderer
 import com.cisco.quadroid.ui.theme.QuadroidTheme
@@ -138,16 +148,59 @@ import com.cisco.quadroid.util.DeviceIdentifier
 import com.google.accompanist.permissions.ExperimentalPermissionsApi
 import com.google.accompanist.permissions.rememberMultiplePermissionsState
 import dagger.hilt.android.AndroidEntryPoint
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
 
+    private val datCameraPermissionLauncher = registerForActivityResult(
+        Wearables.RequestPermissionContract()
+    ) { result ->
+        val granted = result.getOrNull() is PermissionStatus.Granted
+        Log.d("MainActivity", "DAT camera permission result: granted=$granted")
+        if (granted) {
+            viewModel.startGlassesStream()
+        }
+    }
+
+    private val bluetoothPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        Log.d("MainActivity", "BLUETOOTH_CONNECT granted=$granted")
+        if (granted) {
+            // Permission was just granted; kick the DAT SDK to re-check devices.
+            viewModel.reinitializeWearables()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        // BLUETOOTH_CONNECT must be granted before Wearables can enumerate paired devices.
+        // Request it immediately so the SDK has it before the first registration check.
+        if (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            bluetoothPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+
+        viewModel.setDatCameraPermissionLauncher { datCameraPermissionLauncher.launch(it) }
+
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.registrationState.collect { state ->
+                    if (state == RegistrationState.AVAILABLE) {
+                        Log.d("MainActivity", "registrationState=AVAILABLE — auto-launching registration")
+                        viewModel.launchGlassesRegistration(this@MainActivity)
+                    }
+                }
+            }
+        }
 
         // Initialize/Restore Device ID
         DeviceIdentifier.get(this)
@@ -204,6 +257,8 @@ fun MainScreen(viewModel: MainViewModel) {
     val videoAspectRatio by viewModel.videoAspectRatio.collectAsStateWithLifecycle()
     val connectionStatus by viewModel.connectionStatus.collectAsStateWithLifecycle()
     val isCatalogReady by viewModel.isCatalogReady.collectAsStateWithLifecycle()
+    val registrationState by viewModel.registrationState.collectAsStateWithLifecycle()
+    val cameraSource by viewModel.cameraSource.collectAsStateWithLifecycle()
 
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
@@ -211,18 +266,20 @@ fun MainScreen(viewModel: MainViewModel) {
     val permissionsState = rememberMultiplePermissionsState(
         permissions = listOf(
             Manifest.permission.CAMERA,
-            Manifest.permission.RECORD_AUDIO
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.BLUETOOTH_CONNECT,
         )
     )
 
-    // Flag to track if we should start the call once permissions are granted
-    var startCallRequested by remember { mutableStateOf(false) }
+    // Pending camera source selection waiting for permissions to be granted
+    var pendingCameraSource by remember { mutableStateOf<CameraSource?>(null) }
 
     LaunchedEffect(permissionsState.allPermissionsGranted) {
-        if (permissionsState.allPermissionsGranted && startCallRequested) {
-            startCallRequested = false
+        val pending = pendingCameraSource
+        if (permissionsState.allPermissionsGranted && pending != null) {
+            pendingCameraSource = null
             val rotation = context.display?.rotation ?: 0
-            viewModel.startCall(lifecycleOwner, rotation)
+            viewModel.startCall(lifecycleOwner, rotation, pending)
         }
     }
 
@@ -241,17 +298,22 @@ fun MainScreen(viewModel: MainViewModel) {
         Box(modifier = Modifier.fillMaxSize()) {
             when (uiState) {
                 is CallUiState.Lobby -> {
+                    val activity = context as? androidx.activity.ComponentActivity
                     LobbyScreen(
                         connectionStatus = connectionStatus,
                         isCatalogReady = isCatalogReady,
-                        onStartCall = {
+                        registrationState = registrationState,
+                        onStartCall = { source ->
                             if (permissionsState.allPermissionsGranted) {
                                 val rotation = context.display?.rotation ?: 0
-                                viewModel.startCall(lifecycleOwner, rotation)
+                                viewModel.startCall(lifecycleOwner, rotation, source)
                             } else {
-                                startCallRequested = true
+                                pendingCameraSource = source
                                 permissionsState.launchMultiplePermissionRequest()
                             }
+                        },
+                        onConnectGlasses = {
+                            if (activity != null) viewModel.launchGlassesRegistration(activity)
                         },
                         onNavigateToSettings = { viewModel.navigateToSettings() }
                     )
@@ -259,6 +321,7 @@ fun MainScreen(viewModel: MainViewModel) {
                 is CallUiState.InCall -> {
                     InCallScreen(
                         viewModel = viewModel,
+                        cameraSource = cameraSource,
                         connectionStatus = connectionStatus,
                         remoteParticipants = remoteParticipants,
                         isMicEnabled = isMicEnabled,
@@ -437,6 +500,55 @@ fun LiquidGlassButton(
 }
 
 @Composable
+fun GlassesRow(
+    registrationState: RegistrationState,
+    onConnectGlasses: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.White.copy(alpha = 0.06f))
+            .border(0.5.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Column {
+            Text(
+                text = "Ray-Ban Glasses",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                text = when (registrationState) {
+                    RegistrationState.UNAVAILABLE   -> "Meta AI app not installed"
+                    RegistrationState.AVAILABLE     -> "Tap to register"
+                    RegistrationState.REGISTERING   -> "Registering…"
+                    RegistrationState.REGISTERED    -> "Ready"
+                    RegistrationState.UNREGISTERING -> "Unregistering…"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = when (registrationState) {
+                    RegistrationState.REGISTERED  -> Color(0xFF4CAF50)
+                    RegistrationState.UNAVAILABLE -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
+                    else                          -> Color(0xFFFFC107)
+                },
+            )
+        }
+
+        when (registrationState) {
+            RegistrationState.AVAILABLE ->
+                Button(onClick = onConnectGlasses) { Text("Connect") }
+            RegistrationState.REGISTERING, RegistrationState.UNREGISTERING ->
+                CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+            else -> {}
+        }
+    }
+}
+
+@Composable
 fun AutoSlidingBanner(
     modifier: Modifier = Modifier,
     slideDurationMillis: Long = 3000
@@ -530,9 +642,49 @@ fun AutoSlidingBanner(
 fun LobbyScreen(
     connectionStatus: MoqConnectionStatus,
     isCatalogReady: Boolean,
-    onStartCall: () -> Unit,
+    registrationState: RegistrationState,
+    onStartCall: (CameraSource) -> Unit,
+    onConnectGlasses: () -> Unit,
     onNavigateToSettings: () -> Unit
 ) {
+    var showCameraSourceDialog by remember { mutableStateOf(false) }
+
+    if (showCameraSourceDialog) {
+        AlertDialog(
+            onDismissRequest = { showCameraSourceDialog = false },
+            title = { Text("Camera Source") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        "Choose which camera to use for this call.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    showCameraSourceDialog = false
+                    onStartCall(CameraSource.PHONE)
+                }) { Text("Phone Camera") }
+            },
+            dismissButton = {
+                val glassesEnabled = registrationState == RegistrationState.REGISTERED
+                TextButton(
+                    onClick = {
+                        showCameraSourceDialog = false
+                        onStartCall(CameraSource.GLASSES)
+                    },
+                    enabled = glassesEnabled,
+                ) {
+                    Text(
+                        if (glassesEnabled) "Glasses Camera"
+                        else "Glasses Camera (not registered)"
+                    )
+                }
+            }
+        )
+    }
     val isConnected = connectionStatus == MoqConnectionStatus.CONNECTED
     val isConnecting = connectionStatus == MoqConnectionStatus.CONNECTING || connectionStatus == MoqConnectionStatus.IDLE
     val canJoinMeeting = isConnected && isCatalogReady
@@ -588,7 +740,7 @@ fun LobbyScreen(
 
             // 1, 4 & 5. Liquid Glass Button: Material You, Minimalistic
             LiquidGlassButton(
-                onClick = onStartCall,
+                onClick = { showCameraSourceDialog = true },
                 enabled = canJoinMeeting,
                 modifier = Modifier.fillMaxWidth()
             ) {
@@ -627,6 +779,14 @@ fun LobbyScreen(
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Glasses row
+            GlassesRow(
+                registrationState = registrationState,
+                onConnectGlasses = onConnectGlasses,
+            )
         }
 
         // Auto-sliding logo banner at bottom center
@@ -687,6 +847,7 @@ fun ConnectionStatusIcon(status: MoqConnectionStatus, modifier: Modifier = Modif
 @Composable
 fun InCallScreen(
     viewModel: MainViewModel,
+    cameraSource: CameraSource,
     connectionStatus: MoqConnectionStatus,
     remoteParticipants: List<ParticipantStream>,
     isMicEnabled: Boolean,
@@ -726,14 +887,21 @@ fun InCallScreen(
             if (remoteParticipants.isEmpty()) {
                 Log.d("InCallScreen", "Rendering local preview fullscreen (no remote participants)")
                 if (isVideoEnabled) {
-                    key(videoToggleCount) {
-                        PreviewNativeVideoRenderer(
-                            onSurfaceCreated = onLocalPreviewSurfaceReady,
-                            onSurfaceDestroyed = { },
+                    if (cameraSource == CameraSource.GLASSES) {
+                        GlassesPreviewRenderer(
+                            viewModel = viewModel,
                             modifier = Modifier.fillMaxSize(),
-                            mirrorHorizontal = false, // Explicitly disabled mirroring
-                            aspectRatio = localAspectRatio
                         )
+                    } else {
+                        key(videoToggleCount) {
+                            PreviewNativeVideoRenderer(
+                                onSurfaceCreated = onLocalPreviewSurfaceReady,
+                                onSurfaceDestroyed = { },
+                                modifier = Modifier.fillMaxSize(),
+                                mirrorHorizontal = false,
+                                aspectRatio = localAspectRatio
+                            )
+                        }
                     }
                 } else {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -773,14 +941,21 @@ fun InCallScreen(
                         .background(Color.Black.copy(alpha = 0.2f))
                 ) {
                     if (isVideoEnabled) {
-                        key(videoToggleCount) {
-                            PreviewNativeVideoRenderer(
-                                onSurfaceCreated = onLocalPreviewSurfaceReady,
-                                onSurfaceDestroyed = { },
+                        if (cameraSource == CameraSource.GLASSES) {
+                            GlassesPreviewRenderer(
+                                viewModel = viewModel,
                                 modifier = Modifier.fillMaxSize(),
-                                mirrorHorizontal = false, // Explicitly disabled mirroring
-                                aspectRatio = localAspectRatio
                             )
+                        } else {
+                            key(videoToggleCount) {
+                                PreviewNativeVideoRenderer(
+                                    onSurfaceCreated = onLocalPreviewSurfaceReady,
+                                    onSurfaceDestroyed = { },
+                                    modifier = Modifier.fillMaxSize(),
+                                    mirrorHorizontal = false,
+                                    aspectRatio = localAspectRatio
+                                )
+                            }
                         }
                     } else {
                         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -863,6 +1038,61 @@ fun InCallScreen(
                 }
             }
         }
+    }
+}
+
+/**
+ * Renders frames from the glasses camera using the same VideoSurfaceView decoder path
+ * as remote participants. Registers/unregisters the frame listener with the ViewModel.
+ */
+@Composable
+fun GlassesPreviewRenderer(
+    viewModel: MainViewModel,
+    modifier: Modifier = Modifier,
+) {
+    val surfaceViewRef = remember { androidx.compose.runtime.mutableStateOf<com.cisco.quadroid.ui.components.VideoSurfaceView?>(null) }
+
+    DisposableEffect(Unit) {
+        viewModel.setGlassesPreviewListener { data, pts ->
+            surfaceViewRef.value?.feedFrame(data, pts)
+        }
+        onDispose {
+            viewModel.clearGlassesPreviewListener()
+            surfaceViewRef.value = null
+        }
+    }
+
+    Box(modifier = modifier, contentAlignment = Alignment.Center) {
+        AndroidView(
+            factory = { context ->
+                val layout = com.cisco.quadroid.ui.components.AspectRatioFrameLayout(context).apply {
+                    scaleType = com.cisco.quadroid.ui.components.AspectRatioFrameLayout.ScaleType.FIT
+                }
+                val view = com.cisco.quadroid.ui.components.VideoSurfaceView(context).apply {
+                    rotationAngle = 0f
+                    mirrorHorizontal = false
+                    callback = object : com.cisco.quadroid.ui.components.VideoSurfaceView.Callback {
+                        override fun onSurfaceCreated(surface: Surface) {}
+                        override fun onSurfaceDestroyed() { surfaceViewRef.value = null }
+                        override fun onVideoSizeChanged(width: Int, height: Int, rotation: Float) {
+                            val ratio = width.toFloat() / height.toFloat()
+                            layout.setAspectRatio(ratio)
+                        }
+                    }
+                }
+                surfaceViewRef.value = view
+                layout.addView(
+                    view,
+                    android.widget.FrameLayout.LayoutParams(
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                        android.view.Gravity.CENTER
+                    )
+                )
+                layout
+            },
+            modifier = Modifier.fillMaxSize()
+        )
     }
 }
 
@@ -1215,7 +1445,7 @@ fun SettingsScreen(
                 "moq://eng-1.us-west-2.m10x.org:33440",
                 "moq://eng-3.us-west-2.m10x.org:33550",
                 "moq://eng-3.us-west-2.m10x.org:33660",
-                "moq://relay.us-west-2.m10x.org:33437",
+                "moq://relay.us-west-2.m10x.org:33435",
                 "moq://relay.us-east-2.m10x.org:33437",
                 "moq://relay.eu-west-2.m10x.org:33437"
             )

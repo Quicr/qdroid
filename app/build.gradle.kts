@@ -121,6 +121,7 @@ dependencies {
     // Meta Wearables DAT
     implementation(libs.mwdat.core)
     implementation(libs.mwdat.camera)
+    implementation(libs.mwdat.display)
     debugImplementation(libs.mwdat.mockdevice)
 
     // native submodule

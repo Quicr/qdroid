@@ -86,6 +86,7 @@ class VideoSessionManager @Inject constructor(
 
     private var lifecycleOwner: LifecycleOwner? = null
     private var rotation: Int = 0
+    private var useGlassesCamera = false
 
     private val _videoAspectRatio = MutableStateFlow(9f / 16f) // Default portrait aspect ratio
 
@@ -271,7 +272,8 @@ class VideoSessionManager @Inject constructor(
      * @param rotation Screen rotation in degrees (0, 90, 180, 270) for camera orientation
      * @param relayUrl WebSocket URL of the relay server
      */
-    fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String) {
+    fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String, glassesCamera: Boolean = false) {
+        useGlassesCamera = glassesCamera
         Log.e("QUADROID_DEBUG", "╔════════════════════════════════════════╗")
         Log.e("QUADROID_DEBUG", "║    START SESSION CALLED               ║")
         Log.e("QUADROID_DEBUG", "╚════════════════════════════════════════╝")
@@ -291,13 +293,17 @@ class VideoSessionManager @Inject constructor(
             videoEncoderManager.setupEncoders(videoEncoderConfigs)
         }
 
-        // Setup camera with active encoder surface
-        videoEncoderManager.activeInputSurface?.let { surface ->
-            videoEncoderManager.activeConfig?.let { config ->
-                cameraManager.setupCamera(lifecycleOwner, surface, config.width, config.height, rotation)
-                Log.i(tag, "Camera setup initiated with ${config.width}x${config.height}")
-            }
-        } ?: Log.e(tag, "Cannot setup camera - no active encoder surface available")
+        // Setup camera with active encoder surface (skipped when using glasses camera)
+        if (!useGlassesCamera) {
+            videoEncoderManager.activeInputSurface?.let { surface ->
+                videoEncoderManager.activeConfig?.let { config ->
+                    cameraManager.setupCamera(lifecycleOwner, surface, config.width, config.height, rotation)
+                    Log.i(tag, "Camera setup initiated with ${config.width}x${config.height}")
+                }
+            } ?: Log.e(tag, "Cannot setup camera - no active encoder surface available")
+        } else {
+            Log.i(tag, "Glasses camera mode — skipping CameraX setup")
+        }
 
         if (moqTransport.connectionStatus.value != MoqConnectionStatus.CONNECTED) {
             connectToRelay(relayUrl)
@@ -501,21 +507,42 @@ class VideoSessionManager @Inject constructor(
      * @param owner Lifecycle owner for camera binding
      */
     fun enableVideo(enabled: Boolean, owner: LifecycleOwner) {
+        if (useGlassesCamera) return  // glasses stream is managed by WearableManager
         if (enabled) {
             videoEncoderManager.activeInputSurface?.let { surface ->
                 videoEncoderManager.activeConfig?.let { config ->
-                    cameraManager.setupCamera(
-                        owner,
-                        surface,
-                        config.width,
-                        config.height,
-                        rotation
-                    )
+                    cameraManager.setupCamera(owner, surface, config.width, config.height, rotation)
                 }
             }
         } else {
             cameraManager.unbindAll()
         }
+    }
+
+    /**
+     * Ingests a compressed H.264 frame from the glasses camera into the encoder pipeline and
+     * calls the registered local preview listener so the frame appears on screen.
+     */
+    fun feedGlassesFrame(data: ByteArray, pts: Long, isKeyframe: Boolean) {
+        // Send over MoQ via the native video framer (same path as MediaCodec output)
+        val nativeTransport = moqTransport as? MoqNative ?: return
+        val trackName = catalogManager.catalogTrackNamesUrl
+            .firstOrNull { it.contains("video") } ?: return
+        val buf = ByteBuffer.wrap(data)
+        nativeTransport.processVideoFrame(trackName, buf, data.size, isKeyframe, pts)
+
+        // Deliver to local preview listener
+        glassesPreviewListener?.invoke(data, pts)
+    }
+
+    private var glassesPreviewListener: ((ByteArray, Long) -> Unit)? = null
+
+    fun setGlassesPreviewListener(listener: (ByteArray, Long) -> Unit) {
+        glassesPreviewListener = listener
+    }
+
+    fun clearGlassesPreviewListener() {
+        glassesPreviewListener = null
     }
 
     /**

@@ -13,6 +13,10 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 
+    <queries>
+        <package android:name="com.facebook.stella" />
+    </queries>
+
     <application
         android:name=".QuadroidApp"
         android:allowBackup="true"
