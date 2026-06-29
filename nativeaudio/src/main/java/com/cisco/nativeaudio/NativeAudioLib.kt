@@ -16,6 +16,7 @@ class NativeAudioLib {
     // Native Audio Capture
     external fun startCapture(callback: NativeAudioCallback): Boolean
     external fun stopCapture()
+    external fun nativeSetAudioFramer(framerPtr: Long, callbackPtr: Long)
 
     // Native Audio Playback
     external fun startPlayback(trackKey: String): Boolean

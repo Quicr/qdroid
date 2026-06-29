@@ -14,6 +14,8 @@
 #include "moq_util.h"
 #include "video_jitter_buffer.h"
 #include "audio_jitter_buffer.h"
+#include "video_framer.h"
+#include "audio_framer.h"
 #include "loc_wrapper.h"
 
 #define LOG_TAG "MoqJni"
@@ -590,6 +592,11 @@ struct MoqContext {
     std::unordered_map<std::string, std::shared_ptr<AndroidSubscribeNamespaceHandler>> subscribe_ns_handlers;
     std::mutex ns_handlers_mutex;
     jobject kotlin_callback_ref = nullptr;
+
+    // Framer management
+    std::unordered_map<std::string, std::unique_ptr<VideoFramer>> videoFramers;
+    std::unordered_map<std::string, std::unique_ptr<AudioFramer>> audioFramers;
+    std::mutex framers_mutex;
 
     ~MoqContext() {
         JNIEnv* env = nullptr;
@@ -1280,4 +1287,237 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeGetAudioJitterBufferStats(
 
     env->DeleteLocalRef(statsClass);
     return statsObj;
+}
+
+//==============================================================================
+// Video Framer JNI Methods
+//==============================================================================
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeCreateVideoFramer(
+    JNIEnv* env, jobject thiz, jlong ptr, jstring track_name)
+{
+    auto context = reinterpret_cast<MoqContext*>(ptr);
+    std::string trackName = jstring_to_string(env, track_name);
+
+    if (!context || !context->client) {
+        LOGE("nativeCreateVideoFramer: Invalid context");
+        return JNI_FALSE;
+    }
+
+    // Get publish handler for this track
+    auto handler = context->client->get_publish_handler(trackName);
+    if (!handler) {
+        LOGE("nativeCreateVideoFramer: No publish handler for track %s", trackName.c_str());
+        return JNI_FALSE;
+    }
+
+    std::lock_guard<std::mutex> lock(context->framers_mutex);
+
+    // Create video framer
+    try {
+        auto framer = std::make_unique<VideoFramer>(trackName, handler);
+        context->videoFramers[trackName] = std::move(framer);
+        LOGI("nativeCreateVideoFramer: Created framer for track %s", trackName.c_str());
+        return JNI_TRUE;
+    } catch (const std::exception& e) {
+        LOGE("nativeCreateVideoFramer: Exception: %s", e.what());
+        return JNI_FALSE;
+    }
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeProcessVideoFrame(
+    JNIEnv* env, jobject thiz, jlong ptr, jstring track_name,
+    jobject buffer, jint size, jboolean is_keyframe, jlong timestamp_us)
+{
+    auto context = reinterpret_cast<MoqContext*>(ptr);
+    std::string trackName = jstring_to_string(env, track_name);
+
+    if (!context) {
+        LOGE("nativeProcessVideoFrame: Invalid context");
+        return;
+    }
+
+    // Get direct buffer address (zero-copy)
+    uint8_t* data = static_cast<uint8_t*>(env->GetDirectBufferAddress(buffer));
+    if (!data) {
+        LOGE("nativeProcessVideoFrame: Failed to get direct buffer address");
+        return;
+    }
+
+    // Get video framer
+    VideoFramer* framer = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(context->framers_mutex);
+        auto it = context->videoFramers.find(trackName);
+        if (it != context->videoFramers.end()) {
+            framer = it->second.get();
+        }
+    }
+
+    if (!framer) {
+        LOGE("nativeProcessVideoFrame: No framer found for track %s", trackName.c_str());
+        return;
+    }
+
+    // Process the frame
+    framer->processFrame(data, static_cast<size_t>(size),
+                        is_keyframe == JNI_TRUE,
+                        static_cast<uint64_t>(timestamp_us));
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeDestroyVideoFramer(
+    JNIEnv* env, jobject thiz, jlong ptr, jstring track_name)
+{
+    auto context = reinterpret_cast<MoqContext*>(ptr);
+    std::string trackName = jstring_to_string(env, track_name);
+
+    if (!context) {
+        LOGE("nativeDestroyVideoFramer: Invalid context");
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(context->framers_mutex);
+    auto it = context->videoFramers.find(trackName);
+    if (it != context->videoFramers.end()) {
+        context->videoFramers.erase(it);
+        LOGI("nativeDestroyVideoFramer: Destroyed framer for track %s", trackName.c_str());
+    } else {
+        LOGW("nativeDestroyVideoFramer: No framer found for track %s", trackName.c_str());
+    }
+}
+
+//==============================================================================
+// Audio Framer JNI Methods
+//==============================================================================
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeCreateAudioFramer(
+    JNIEnv* env, jobject thiz, jlong ptr, jstring track_name, jboolean vad_enabled)
+{
+    auto context = reinterpret_cast<MoqContext*>(ptr);
+    std::string trackName = jstring_to_string(env, track_name);
+
+    if (!context || !context->client) {
+        LOGE("nativeCreateAudioFramer: Invalid context");
+        return JNI_FALSE;
+    }
+
+    // Get publish handler for this track
+    auto handler = context->client->get_publish_handler(trackName);
+    if (!handler) {
+        LOGE("nativeCreateAudioFramer: No publish handler for track %s", trackName.c_str());
+        return JNI_FALSE;
+    }
+
+    std::lock_guard<std::mutex> lock(context->framers_mutex);
+
+    // Create audio framer
+    try {
+        auto framer = std::make_unique<AudioFramer>(trackName, handler,
+                                                     vad_enabled == JNI_TRUE);
+        context->audioFramers[trackName] = std::move(framer);
+        LOGI("nativeCreateAudioFramer: Created framer for track %s (VAD: %d)",
+             trackName.c_str(), vad_enabled);
+        return JNI_TRUE;
+    } catch (const std::exception& e) {
+        LOGE("nativeCreateAudioFramer: Exception: %s", e.what());
+        return JNI_FALSE;
+    }
+}
+
+// Callback wrapper for AudioFramer::processPacket (called from nativeaudio module)
+extern "C" void audioFramerProcessPacketCallback(void* framer, const uint8_t* data, size_t size, uint64_t timestamp_us) {
+    AudioFramer* audioFramer = static_cast<AudioFramer*>(framer);
+    if (audioFramer) {
+        audioFramer->processPacket(data, size, timestamp_us);
+    }
+}
+
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeLinkAudioFramer(
+    JNIEnv* env, jobject thiz, jlong ptr, jstring track_name)
+{
+    auto context = reinterpret_cast<MoqContext*>(ptr);
+    std::string trackName = jstring_to_string(env, track_name);
+
+    if (!context) {
+        LOGE("nativeLinkAudioFramer: Invalid context");
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> lock(context->framers_mutex);
+    auto it = context->audioFramers.find(trackName);
+    if (it != context->audioFramers.end()) {
+        // Return raw pointer to AudioFramer for nativeaudio.cpp to use
+        AudioFramer* framer = it->second.get();
+        LOGI("nativeLinkAudioFramer: Linked framer for track %s (ptr: %p)",
+             trackName.c_str(), static_cast<void*>(framer));
+        return reinterpret_cast<jlong>(framer);
+    } else {
+        LOGE("nativeLinkAudioFramer: No framer found for track %s", trackName.c_str());
+        return 0;
+    }
+}
+
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeGetAudioFramerCallback(
+    JNIEnv* env, jobject thiz)
+{
+    // Return the function pointer to the callback wrapper
+    return reinterpret_cast<jlong>(&audioFramerProcessPacketCallback);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeSetAudioVad(
+    JNIEnv* env, jobject thiz, jlong ptr, jstring track_name, jboolean enabled)
+{
+    auto context = reinterpret_cast<MoqContext*>(ptr);
+    std::string trackName = jstring_to_string(env, track_name);
+
+    if (!context) {
+        LOGE("nativeSetAudioVad: Invalid context");
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(context->framers_mutex);
+    auto it = context->audioFramers.find(trackName);
+    if (it != context->audioFramers.end()) {
+        it->second->setVadEnabled(enabled == JNI_TRUE);
+        LOGI("nativeSetAudioVad: Set VAD to %d for track %s", enabled, trackName.c_str());
+    } else {
+        LOGW("nativeSetAudioVad: No framer found for track %s", trackName.c_str());
+    }
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeDestroyAudioFramer(
+    JNIEnv* env, jobject thiz, jlong ptr, jstring track_name)
+{
+    auto context = reinterpret_cast<MoqContext*>(ptr);
+    std::string trackName = jstring_to_string(env, track_name);
+
+    if (!context) {
+        LOGE("nativeDestroyAudioFramer: Invalid context");
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(context->framers_mutex);
+    auto it = context->audioFramers.find(trackName);
+    if (it != context->audioFramers.end()) {
+        context->audioFramers.erase(it);
+        LOGI("nativeDestroyAudioFramer: Destroyed framer for track %s", trackName.c_str());
+    } else {
+        LOGW("nativeDestroyAudioFramer: No framer found for track %s", trackName.c_str());
+    }
 }

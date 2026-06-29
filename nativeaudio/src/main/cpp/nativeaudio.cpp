@@ -14,6 +14,9 @@
 #include <opus.h>
 #include "lockfree_queue.h"
 
+// Callback type for audio framer (avoids cross-module dependencies)
+typedef void (*AudioFramerCallback)(void* framer, const uint8_t* data, size_t size, uint64_t timestamp_us);
+
 #define TAG "NativeAudio"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
@@ -130,6 +133,12 @@ public:
         return DataCallbackResult::Continue;
     }
 
+    void setAudioFramer(void* framer, AudioFramerCallback callback) {
+        audioFramer = framer;
+        framerCallback = callback;
+        LOGD("AudioCapture::setAudioFramer() - Framer set to %p, callback %p", framer, (void*)callback);
+    }
+
 private:
     JavaVM* jvm;
     jobject callback = nullptr;
@@ -140,6 +149,10 @@ private:
     std::thread encodeThread;
 
     LockFreeQueue<std::vector<int16_t>, QUEUE_CAPACITY> pcmQueue;
+
+    // Audio framer for direct native-to-native path
+    void* audioFramer = nullptr;
+    AudioFramerCallback framerCallback = nullptr;
 
     void encodeLoop() {
         std::vector<int16_t> pcmData;
@@ -167,15 +180,22 @@ private:
                          frameCount, encodedBytes);
                 }
 
-                // Send to Java callback
-                JNIEnv* env = getEnv();
-                if (env && callback) {
-                    jobject byteBuffer = env->NewDirectByteBuffer(opusData.data(), encodedBytes);
+                // Direct native path: call audio framer if available
+                if (audioFramer && framerCallback) {
                     auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::system_clock::now().time_since_epoch()).count();
-                    env->CallVoidMethod(callback, onAudioEncodedId, byteBuffer,
-                                      (jint)encodedBytes, (jlong)timestamp, (jint)0);
-                    env->DeleteLocalRef(byteBuffer);
+                    framerCallback(audioFramer, opusData.data(), encodedBytes, timestamp);
+                } else {
+                    // Fallback: Send to Java callback (legacy path)
+                    JNIEnv* env = getEnv();
+                    if (env && callback) {
+                        jobject byteBuffer = env->NewDirectByteBuffer(opusData.data(), encodedBytes);
+                        auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count();
+                        env->CallVoidMethod(callback, onAudioEncodedId, byteBuffer,
+                                          (jint)encodedBytes, (jlong)timestamp, (jint)0);
+                        env->DeleteLocalRef(byteBuffer);
+                    }
                 }
             } else {
                 // Queue empty, sleep briefly
@@ -395,6 +415,23 @@ extern "C" {
         std::lock_guard<std::mutex> lock(gPlaybackMutex);
         if (gPlaybacks.count(key)) {
             gPlaybacks[key]->feed(data, size);
+        }
+    }
+
+    JNIEXPORT void JNICALL
+    Java_com_cisco_nativeaudio_NativeAudioLib_nativeSetAudioFramer(
+        JNIEnv* env, jclass, jlong framer_ptr, jlong callback_ptr) {
+        void* framer = reinterpret_cast<void*>(framer_ptr);
+        AudioFramerCallback callback = reinterpret_cast<AudioFramerCallback>(callback_ptr);
+
+        std::lock_guard<std::mutex> lock(gPlaybackMutex);
+        if (gCapture && framer && callback) {
+            gCapture->setAudioFramer(framer, callback);
+            LOGD("nativeSetAudioFramer: Set framer %p with callback %p to global capture",
+                 framer, (void*)callback);
+        } else {
+            LOGE("nativeSetAudioFramer: gCapture=%p, framer=%p, callback=%p",
+                 static_cast<void*>(gCapture.get()), framer, (void*)callback);
         }
     }
 }

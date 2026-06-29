@@ -155,6 +155,41 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
     override fun endSubgroup(trackName: String, groupId: Long, subgroupId: Long, completed: Boolean) {
         if (nativePtr != 0L) nativeEndSubGroup(nativePtr, trackName, groupId, 0 , completed = true)
     }
+
+    // Video framer public methods
+    fun createVideoFramer(trackName: String): Boolean {
+        return if (nativePtr != 0L) nativeCreateVideoFramer(nativePtr, trackName) else false
+    }
+
+    fun processVideoFrame(trackName: String, buffer: ByteBuffer, size: Int, isKeyframe: Boolean, timestampUs: Long) {
+        if (nativePtr != 0L) nativeProcessVideoFrame(nativePtr, trackName, buffer, size, isKeyframe, timestampUs)
+    }
+
+    fun destroyVideoFramer(trackName: String) {
+        if (nativePtr != 0L) nativeDestroyVideoFramer(nativePtr, trackName)
+    }
+
+    // Audio framer public methods
+    fun createAudioFramer(trackName: String, vadEnabled: Boolean): Boolean {
+        return if (nativePtr != 0L) nativeCreateAudioFramer(nativePtr, trackName, vadEnabled) else false
+    }
+
+    fun linkAudioFramer(trackName: String): Long {
+        return if (nativePtr != 0L) nativeLinkAudioFramer(nativePtr, trackName) else 0L
+    }
+
+    fun getAudioFramerCallback(): Long {
+        return nativeGetAudioFramerCallback()
+    }
+
+    fun setAudioVad(trackName: String, enabled: Boolean) {
+        if (nativePtr != 0L) nativeSetAudioVad(nativePtr, trackName, enabled)
+    }
+
+    fun destroyAudioFramer(trackName: String) {
+        if (nativePtr != 0L) nativeDestroyAudioFramer(nativePtr, trackName)
+    }
+
     private fun trackKey(fullName: String): String = TrackUtil.generateTrackKeyFromFullName(fullName)
 
     private external fun nativeConnect(url: String, deviceId: String): Long
@@ -182,7 +217,24 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
 
     private external fun nativeEndSubGroup(ptr: Long, trackName: String, groupId: Long, subgroupId: Long, completed: Boolean)
 
+    // Video framer methods
+    external fun nativeCreateVideoFramer(ptr: Long, trackName: String): Boolean
+    external fun nativeProcessVideoFrame(
+        ptr: Long,
+        trackName: String,
+        buffer: ByteBuffer,
+        size: Int,
+        isKeyframe: Boolean,
+        timestampUs: Long
+    )
+    external fun nativeDestroyVideoFramer(ptr: Long, trackName: String)
 
+    // Audio framer methods
+    external fun nativeCreateAudioFramer(ptr: Long, trackName: String, vadEnabled: Boolean): Boolean
+    external fun nativeLinkAudioFramer(ptr: Long, trackName: String): Long
+    external fun nativeGetAudioFramerCallback(): Long
+    external fun nativeSetAudioVad(ptr: Long, trackName: String, enabled: Boolean)
+    external fun nativeDestroyAudioFramer(ptr: Long, trackName: String)
 
 
     // Video jitter buffer methods

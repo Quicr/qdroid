@@ -11,6 +11,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <application
         android:name=".QuadroidApp"
@@ -22,6 +23,15 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Quadroid">
+        <meta-data android:name="com.meta.wearable.mwdat.APPLICATION_ID"
+                   android:value="${mwdat_application_id}" />
+        <meta-data
+                   android:name="com.meta.wearable.mwdat.CLIENT_TOKEN"
+                   android:value="${mwdat_client_token}" />
+        <meta-data
+            android:name="com.meta.wearable.mwdat.DAM_ENABLED"
+            android:value="true" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -30,8 +40,14 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- DAT OAuth callback: register "qdroid" as your redirect scheme in the Meta developer portal -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="qdroid" />
             </intent-filter>
         </activity>
     </application>

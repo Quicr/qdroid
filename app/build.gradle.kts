@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 Cisco Systems
 // SPDX-License-Identifier: BSD-2-Clause
 
+import java.util.Properties
+
+val localProps = Properties().apply {
+    rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+}
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -22,6 +28,10 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // Manifest placeholders for DAT credentials — values come from local.properties
+        manifestPlaceholders["mwdat_application_id"] = localProps.getProperty("mwdat.application_id") ?: ""
+        manifestPlaceholders["mwdat_client_token"] = localProps.getProperty("mwdat.client_token") ?: ""
 
         // Cloudflare relay feature flag
         buildConfigField("Boolean", "ENABLE_CLOUDFLARE", "false")
@@ -107,6 +117,11 @@ dependencies {
     
     // Concurrency
     implementation(libs.androidx.concurrent.futures.ktx)
+
+    // Meta Wearables DAT
+    implementation(libs.mwdat.core)
+    implementation(libs.mwdat.camera)
+    debugImplementation(libs.mwdat.mockdevice)
 
     // native submodule
     implementation(project(":nativeaudio"))

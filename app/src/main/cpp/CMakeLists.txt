@@ -74,6 +74,9 @@ add_library(moq_jni SHARED
     moq_jni.cpp
     video_jitter_buffer.cpp
     audio_jitter_buffer.cpp
+    video_framer.cpp
+    audio_framer.cpp
+    native_vad.cpp
     loc_wrapper.cpp
 )
 

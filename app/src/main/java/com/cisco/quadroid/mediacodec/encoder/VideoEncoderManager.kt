@@ -13,7 +13,7 @@ import android.util.Log
 import android.view.Surface
 import com.cisco.quadroid.mediacodec.model.EncoderState
 import com.cisco.quadroid.mediacodec.model.VideoEncoderConfig
-import com.cisco.quadroid.transport.MoqMediaFramer
+import com.cisco.quadroid.transport.MoqNative
 import com.cisco.quadroid.transport.MoqTransport
 
 class VideoEncoderManager(
@@ -60,8 +60,9 @@ class VideoEncoderManager(
                     }
                 }
 
-                // Create framer for this track
-                val framer = MoqMediaFramer(moqTransport, config.trackNameUrl)
+                // Create native framer for this track
+                val nativeTransport = moqTransport as MoqNative
+                nativeTransport.createVideoFramer(config.trackNameUrl)
 
                 val encoder = MediaCodec.createEncoderByType(videoMimeType).apply {
                     setCallback(object : MediaCodec.Callback() {
@@ -74,7 +75,15 @@ class VideoEncoderManager(
                             try {
                                 getOutputBuffer(index)?.let { buffer ->
                                     if (info.size > 0) {
-                                        framer.processFrame(buffer, info)
+                                        // Process frame with native framer
+                                        val isKeyframe = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                                        nativeTransport.processVideoFrame(
+                                            config.trackNameUrl,
+                                            buffer,
+                                            info.size,
+                                            isKeyframe,
+                                            info.presentationTimeUs
+                                        )
 
                                         // Track encoding success for adaptive quality (only for active encoder)
                                         val encoderIndex = encoders.indexOfFirst {
@@ -133,8 +142,7 @@ class VideoEncoderManager(
                 val encoderState = EncoderState(
                     encoder = encoder,
                     inputSurface = inputSurface,
-                    config = config,
-                    framer = framer
+                    config = config
                 )
 
                 encoders.add(encoderState)
@@ -224,11 +232,16 @@ class VideoEncoderManager(
         encoderHandler.removeCallbacksAndMessages(null)
 
         // Stop and release all encoders
+        val nativeTransport = moqTransport as? MoqNative
         encoders.forEach { encoderState ->
             try {
                 encoderState.encoder.stop()
                 encoderState.encoder.release()
                 encoderState.inputSurface.release()
+
+                // Destroy native framer
+                nativeTransport?.destroyVideoFramer(encoderState.config.trackNameUrl)
+
                 Log.d(tag, "Released encoder for ${encoderState.config.trackNameUrl}")
             } catch (e: Exception) {
                 Log.e(tag, "Error releasing encoder for ${encoderState.config.trackNameUrl}", e)

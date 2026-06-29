@@ -24,6 +24,8 @@ kotlinxSerialization = "1.7.3"
 coil = "2.7.0"
 gservices = "4.4.4"
 firebase = "34.12.0"
+mwdat = "0.7.0"
+
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -79,6 +81,11 @@ turbine = { group = "app.cash.turbine", name = "turbine", version.ref = "turbine
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 firebase ={ group = "com.google.firebase", name="firebase-bom", version.ref ="firebase"}
+
+#Meta Wearables SDK
+mwdat-core = { group = "com.meta.wearable", name = "mwdat-core", version.ref = "mwdat" }
+mwdat-camera = { group = "com.meta.wearable", name = "mwdat-camera", version.ref = "mwdat" }
+mwdat-mockdevice = { group = "com.meta.wearable", name = "mwdat-mockdevice", version.ref = "mwdat" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
