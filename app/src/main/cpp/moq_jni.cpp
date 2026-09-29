@@ -9,8 +9,10 @@
 #include <mutex>
 #include <vector>
 #include <android/log.h>
-#include <quicr/client.h>
-#include <quicr/object.h>
+#include <quicr/session.h>
+#include <quicr/session_manager.h>
+#include <quicr/session_callbacks.h>
+#include <quicr/messages/object.h>
 #include "moq_util.h"
 #include "video_jitter_buffer.h"
 #include "audio_jitter_buffer.h"
@@ -29,7 +31,7 @@ class AndroidPublishTrackHandler;
 class AndroidSubscribeTrackHandler;
 class AndroidPublishNamespaceHandler;
 class AndroidSubscribeNamespaceHandler;
-class AndroidMoqClient;
+class AndroidClientCallbacks;
 
 //==============================================================================
 // Helper Functions
@@ -351,7 +353,7 @@ class AndroidSubscribeNamespaceHandler : public quicr::SubscribeNamespaceHandler
 public:
     AndroidSubscribeNamespaceHandler(const quicr::TrackNamespace& prefix,
                                      jobject callback_ref)
-      : quicr::SubscribeNamespaceHandler(prefix)
+      : quicr::SubscribeNamespaceHandler(prefix, quicr::SubscribeNamespaceHandler::Mode::kTracks)
       , callback_ref_(callback_ref)
       , callback_valid_(true)
     {
@@ -379,21 +381,25 @@ private:
 };
 
 //==============================================================================
-// Android MoQ Client
+// Android Client Callbacks
 //==============================================================================
 
-class AndroidMoqClient : public quicr::Client
+class AndroidClientCallbacks : public quicr::Session::ClientCallbacks
 {
 public:
-    AndroidMoqClient(const quicr::ClientConfig& cfg, jobject kotlin_callback)
-      : quicr::Client(cfg)
-      , kotlin_callback_ref_(kotlin_callback)
+    explicit AndroidClientCallbacks(jobject kotlin_callback)
+      : kotlin_callback_ref_(kotlin_callback)
     {
-        LOGI("AndroidMoqClient created with URL: %s EndpointID: %s",
-             cfg.connect_uri.c_str(), cfg.endpoint_id.c_str());
+        LOGI("AndroidClientCallbacks created");
     }
 
-    void StatusChanged(Status status) override
+    static std::shared_ptr<AndroidClientCallbacks> Create(jobject kotlin_callback)
+    {
+        return std::shared_ptr<AndroidClientCallbacks>(new AndroidClientCallbacks(kotlin_callback));
+    }
+
+    void StatusChanged([[maybe_unused]] const std::shared_ptr<quicr::Session>& session,
+                       quicr::Session::Status status) override
     {
         LOGI("Connection status changed: %d", static_cast<int>(status));
 
@@ -433,22 +439,21 @@ public:
         }
     }
 
-    void PublishNamespaceReceived(const quicr::TrackNamespace& track_namespace,
-                                  const quicr::PublishNamespaceAttributes&) override
+    quicr::Reply<void, quicr::PublishNamespaceErrorCode> PublishNamespaceReceived(
+      [[maybe_unused]] const std::shared_ptr<quicr::Session>& session,
+      const quicr::TrackNamespace& track_namespace,
+      [[maybe_unused]] const quicr::PublishNamespaceAttributes& publish_namespace_attributes) override
     {
         auto th = quicr::TrackHash({ track_namespace, {} });
         LOGI("Received ANNOUNCE for namespace_hash: %llu", th.track_namespace_hash);
+        return {};
     }
 
-    void PublishNamespaceDoneReceived(quicr::messages::RequestID rid) override
-    {
-        LOGI("Received UNANNOUNCE for request_id: %llu", rid);
-    }
-
-    void PublishReceived(quicr::ConnectionHandle connection_handle,
-                         uint64_t request_id,
-                         const quicr::messages::PublishAttributes& publish_attributes,
-                         [[maybe_unused]] std::weak_ptr<quicr::SubscribeNamespaceHandler> ns_handler) override
+    quicr::Reply<const quicr::PublishResponse, quicr::PublishErrorCode> PublishReceived(
+      [[maybe_unused]] const std::shared_ptr<quicr::Session>& session,
+      std::uint64_t request_id,
+      const quicr::PublishAttributes& publish_attributes,
+      std::weak_ptr<quicr::SubscribeNamespaceHandler> ns_handler) override
     {
         auto th = quicr::TrackHash(publish_attributes.track_full_name);
         LOGI("Received PUBLISH from relay for track namespace_hash: %llu name_hash: %llu request_id: %llu",
@@ -476,13 +481,6 @@ public:
 
         // Store the handler
         subscribe_handlers_[track_name_str] = handler;
-
-        // Accept the PUBLISH
-        ResolvePublish(*GetConnectionHandle(),
-                     request_id,
-                     publish_attributes,
-                     { .reason_code = quicr::PublishResponse::ReasonCode::kOk },
-                     std::move(handler));
 
         // Invoke onMatch if ns_handler is available
         if (auto shared_ns_handler = ns_handler.lock()) {
@@ -512,6 +510,9 @@ public:
         }
 
         LOGI("Accepted PUBLISH for track: %s", track_name_str.c_str());
+
+        // Accept the PUBLISH by returning the track handler
+        return quicr::PublishResponse{ {}, std::move(handler) };
     }
 
     // Store track handlers
@@ -556,18 +557,18 @@ public:
     }
 
 private:
-    int mapStatusToKotlin(Status status)
+    int mapStatusToKotlin(quicr::Session::Status status)
     {
         switch (status) {
-            case Status::kNotConnected:
+            case quicr::Session::Status::kNotConnected:
                 return 0; // IDLE
-            case Status::kConnecting:
+            case quicr::Session::Status::kConnecting:
                 return 1; // CONNECTING
-            case Status::kPendingServerSetup:
+            case quicr::Session::Status::kPendingPeerSetup:
                 return 1; // Still connecting
-            case Status::kReady:
+            case quicr::Session::Status::kReady:
                 return 2; // CONNECTED
-            case Status::kDisconnecting:
+            case quicr::Session::Status::kDisconnecting:
                 return 3; // DISCONNECTED
             default:
                 return 4; // ERROR
@@ -585,7 +586,9 @@ private:
 //==============================================================================
 
 struct MoqContext {
-    std::shared_ptr<AndroidMoqClient> client;
+    quicr::SessionManager session_mgr;
+    std::shared_ptr<AndroidClientCallbacks> callbacks;
+    std::shared_ptr<quicr::Session> session;
     std::unordered_map<std::string, std::shared_ptr<AndroidPublishNamespaceHandler>> publish_ns_handlers;
     std::unordered_map<std::string, std::shared_ptr<AndroidSubscribeNamespaceHandler>> subscribe_ns_handlers;
     std::mutex ns_handlers_mutex;
@@ -635,20 +638,22 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeConnect(JNIEnv *env, jobject t
     config.endpoint_id = native_device_id;
     config.transport_config.debug = true;
     config.transport_config.time_queue_max_duration = 5000;
-    config.transport_config.use_reset_wait_strategy = false;
     config.transport_config.tls_cert_filename = "";
     config.transport_config.tls_key_filename = "";
 
-    context->client = std::make_shared<AndroidMoqClient>(config, context->kotlin_callback_ref);
+    context->callbacks = AndroidClientCallbacks::Create(context->kotlin_callback_ref);
 
-    auto status = context->client->Connect();
-    LOGI("nativeConnect: Connect() returned status: %d", static_cast<int>(status));
+    auto weak_session = context->session_mgr.AddTransport(config, context->callbacks);
+    context->session = weak_session.lock();
 
-    if (status != quicr::Transport::Status::kConnecting) {
+    if (!context->session) {
         LOGE("nativeConnect: Failed to initiate connection");
         delete context;
         return 0;
     }
+
+    LOGI("nativeConnect: Session created, status: %d",
+         static_cast<int>(context->session->GetStatus()));
 
     return reinterpret_cast<jlong>(context);
 }
@@ -659,9 +664,9 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeDisconnect(JNIEnv *env, jobjec
 {
     auto context = reinterpret_cast<MoqContext *>(ptr);
 
-    if (context && context->client) {
+    if (context && context->session) {
         LOGI("nativeDisconnect: Disconnecting client");
-        context->client->Disconnect();
+        context->session->Disconnect();
     }
 
     delete context;
@@ -676,18 +681,18 @@ Java_com_cisco_quadroid_transport_MoqNative_nativePublishNamespace(JNIEnv *env, 
     auto context = reinterpret_cast<MoqContext *>(ptr);
     std::string prefix = jstring_to_string(env, namespace_prefix);
 
-    if (!context || !context->client) {
+    if (!context || !context->session) {
         LOGE("nativePublishNamespace: Invalid context");
         return;
     }
 
     // Wait for connection to be ready
     int retries = 50; // 5 seconds
-    while (context->client->GetStatus() != quicr::Transport::Status::kReady && retries-- > 0) {
+    while (context->session->GetStatus() != quicr::Session::Status::kReady && retries-- > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    if (context->client->GetStatus() != quicr::Transport::Status::kReady) {
+    if (context->session->GetStatus() != quicr::Session::Status::kReady) {
         LOGE("nativePublishNamespace: Client not ready");
         return;
     }
@@ -702,7 +707,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativePublishNamespace(JNIEnv *env, 
         context->publish_ns_handlers[prefix] = handler;
     }
 
-    context->client->PublishNamespace(handler);
+    context->session->PublishNamespace(handler);
 
     LOGI("nativePublishNamespace: Announced namespace %s", prefix.c_str());
 }
@@ -716,18 +721,18 @@ Java_com_cisco_quadroid_transport_MoqNative_nativePublish(JNIEnv *env, jobject t
     auto context = reinterpret_cast<MoqContext *>(ptr);
     std::string name = jstring_to_string(env, track_name);
 
-    if (!context || !context->client) {
+    if (!context || !context->session) {
         LOGE("nativePublish: Invalid context");
         return;
     }
 
     // Wait for connection to be ready
     int retries = 50; // 5 seconds
-    while (context->client->GetStatus() != quicr::Transport::Status::kReady && retries-- > 0) {
+    while (context->session->GetStatus() != quicr::Session::Status::kReady && retries-- > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    if (context->client->GetStatus() != quicr::Transport::Status::kReady) {
+    if (context->session->GetStatus() != quicr::Session::Status::kReady) {
         LOGE("nativePublish: Client not ready");
         return;
     }
@@ -744,8 +749,8 @@ Java_com_cisco_quadroid_transport_MoqNative_nativePublish(JNIEnv *env, jobject t
         3000 // default TTL
     );
 
-    context->client->add_publish_handler(name, handler);
-    context->client->PublishTrack(handler);
+    context->callbacks->add_publish_handler(name, handler);
+    context->session->PublishTrack(handler);
 
     LOGI("nativePublish: Published track %s", name.c_str());
 }
@@ -758,15 +763,15 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeUnpublish(JNIEnv *env, jobject
     auto context = reinterpret_cast<MoqContext *>(ptr);
     std::string name = jstring_to_string(env, track_name);
 
-    if (!context || !context->client) {
+    if (!context || !context->session) {
         LOGE("nativeUnpublish: Invalid context");
         return;
     }
 
-    auto handler = context->client->get_publish_handler(name);
+    auto handler = context->callbacks->get_publish_handler(name);
     if (handler) {
-        context->client->UnpublishTrack(handler);
-        context->client->remove_publish_handler(name);
+        context->session->UnpublishTrack(handler);
+        context->callbacks->remove_publish_handler(name);
         LOGI("nativeUnpublish: Unpublished track %s", name.c_str());
     }
 }
@@ -783,7 +788,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
     auto context = reinterpret_cast<MoqContext *>(ptr);
     std::string name = jstring_to_string(env, track_name);
 
-    if (!context || !context->client) {
+    if (!context || !context->session) {
         LOGE("nativeSendObject: Invalid context");
         return;
     }
@@ -794,7 +799,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
         return;
     }
 
-    auto handler = context->client->get_publish_handler(name);
+    auto handler = context->callbacks->get_publish_handler(name);
     if (!handler) {
         LOGE("nativeSendObject: No publish handler for track %s", name.c_str());
         return;
@@ -804,6 +809,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
         // Not ready yet
         return;
     }
+
 
     // Prepare LOC metadata
     LocMetadata locMeta;
@@ -828,10 +834,14 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
 
     // Wrap codec data with LOC
     std::vector<uint8_t> locWrappedData = LocWrapper::wrap(data, payload_size, locMeta);
+    if (locWrappedData.empty()) {
+        LOGE("nativeSendObject: Failed to wrap data with LOC");
+        return;
+    }
+    std::optional<uint16_t> ttl_opt;
 
-    std::optional<uint32_t> ttl_opt;
     if (delivery_timeout_ms > 0) {
-        ttl_opt = static_cast<uint32_t>(delivery_timeout_ms);
+        ttl_opt = static_cast<uint16_t>(delivery_timeout_ms);
     }
 
     quicr::ObjectHeaders headers = {
@@ -874,18 +884,18 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSubscribe(JNIEnv *env, jobject
     auto context = reinterpret_cast<MoqContext *>(ptr);
     std::string name = jstring_to_string(env, track_name);
 
-    if (!context || !context->client) {
+    if (!context || !context->session) {
         LOGE("nativeSubscribe: Invalid context");
         return;
     }
 
     // Wait for connection to be ready
     int retries = 50; // 5 seconds
-    while (context->client->GetStatus() != quicr::Transport::Status::kReady && retries-- > 0) {
+    while (context->session->GetStatus() != quicr::Session::Status::kReady && retries-- > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    if (context->client->GetStatus() != quicr::Transport::Status::kReady) {
+    if (context->session->GetStatus() != quicr::Session::Status::kReady) {
         LOGE("nativeSubscribe: Client not ready");
         return;
     }
@@ -897,8 +907,8 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSubscribe(JNIEnv *env, jobject
 
     auto handler = std::make_shared<AndroidSubscribeTrackHandler>(full_track_name, callback_ref);
 
-    context->client->add_subscribe_handler(name, handler);
-    context->client->SubscribeTrack(handler);
+    context->callbacks->add_subscribe_handler(name, handler);
+    context->session->SubscribeTrack(handler);
 
     LOGI("nativeSubscribe: Subscribed to track %s", name.c_str());
 }
@@ -911,15 +921,15 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeUnsubscribe(JNIEnv *env, jobje
     auto context = reinterpret_cast<MoqContext *>(ptr);
     std::string name = jstring_to_string(env, track_name);
 
-    if (!context || !context->client) {
+    if (!context || !context->session) {
         LOGE("nativeUnsubscribe: Invalid context");
         return;
     }
 
-    auto handler = context->client->get_subscribe_handler(name);
+    auto handler = context->callbacks->get_subscribe_handler(name);
     if (handler) {
-        context->client->UnsubscribeTrack(handler);
-        context->client->remove_subscribe_handler(name);
+        context->session->UnsubscribeTrack(handler);
+        context->callbacks->remove_subscribe_handler(name);
         LOGI("nativeUnsubscribe: Unsubscribed from track %s", name.c_str());
     }
 }
@@ -934,7 +944,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSubscribeNamespace(JNIEnv *env
     auto context = reinterpret_cast<MoqContext *>(ptr);
     std::string prefix = jstring_to_string(env, namespace_prefix);
 
-    if (!context || !context->client) {
+    if (!context || !context->session) {
         LOGE("nativeSubscribeNamespace: Invalid context");
         return;
     }
@@ -951,7 +961,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSubscribeNamespace(JNIEnv *env
         context->subscribe_ns_handlers[prefix] = handler;
     }
 
-    context->client->SubscribeNamespace(handler);
+    context->session->SubscribeNamespace(handler);
 
     // Wait for OK status
     int retries = 50; // 5 seconds
@@ -981,7 +991,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSetNamespaceDefaultBehavior(JN
 {
     auto context = reinterpret_cast<MoqContext *>(ptr);
 
-    if (!context || !context->client) {
+    if (!context || !context->session) {
         LOGE("nativeSetNamespaceDefaultBehavior: Invalid context");
         return;
     }
@@ -998,7 +1008,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeUnpublishNamespace(JNIEnv *env
     auto context = reinterpret_cast<MoqContext *>(ptr);
     std::string prefix = jstring_to_string(env, namespace_prefix);
 
-    if (!context || !context->client) {
+    if (!context || !context->session) {
         LOGE("nativeUnpublishNamespace: Invalid context");
         return;
     }
@@ -1016,7 +1026,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeUnpublishNamespace(JNIEnv *env
 
     if (handler) {
         LOGI("nativeUnpublishNamespace: Unpublishing namespace %s", prefix.c_str());
-        context->client->PublishNamespaceDone(handler);
+        context->session->PublishNamespaceDone(handler);
         LOGI("nativeUnpublishNamespace: Successfully unpublished namespace %s", prefix.c_str());
     } else {
         LOGE("nativeUnpublishNamespace: No active namespace publish for prefix: %s", prefix.c_str());
@@ -1031,7 +1041,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeUnsubscribeNamespace(JNIEnv *e
     auto context = reinterpret_cast<MoqContext *>(ptr);
     std::string prefix = jstring_to_string(env, namespace_prefix);
 
-    if (!context || !context->client) {
+    if (!context || !context->session) {
         LOGE("nativeUnsubscribeNamespace: Invalid context");
         return;
     }
@@ -1057,7 +1067,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeUnsubscribeNamespace(JNIEnv *e
         handler->InvalidateCallback();
 
         // Unsubscribe from the namespace
-        context->client->UnsubscribeNamespace(handler);
+        context->session->UnsubscribeNamespace(handler);
 
         // Clean up the callback reference
         if (callback_to_delete) {
@@ -1087,13 +1097,13 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeEndSubGroup(JNIEnv *env, jobje
                                                               jlong subgroup_id, jboolean completed) {
     auto context = reinterpret_cast<MoqContext *>(ptr);
 
-    if (!context || !context->client) {
+    if (!context || !context->session) {
         LOGE("nativeEndSubGroup: Invalid context");
         return;
     }
     std::string name = jstring_to_string(env, track_name);
 
-    auto handler = context->client->get_publish_handler(name);
+    auto handler = context->callbacks->get_publish_handler(name);
     if (!handler) {
         LOGE("nativeEndSubGroup: No publish handler for track %s", name.c_str());
         return;
