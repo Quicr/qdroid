@@ -31,9 +31,19 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
     private val _connectionStatus = MutableStateFlow(MoqConnectionStatus.IDLE)
     override val connectionStatus: StateFlow<MoqConnectionStatus> = _connectionStatus.asStateFlow()
     private var connectionJob: Job? = null
-    
+
+    /**
+     * Latch set once the session reaches CONNECTED. While latched, a spurious
+     * native kNotConnected (mapped to IDLE) is ignored, because libquicr can emit
+     * a transient kNotConnected after a healthy connect while media keeps flowing.
+     * Only a genuine terminal signal (DISCONNECTED/ERROR) or an explicit
+     * disconnect() clears the latch.
+     */
+    private var connectionLatched = false
+
     override fun connect(url: String, deviceId: String) {
         connectionJob?.cancel()
+        connectionLatched = false
         connectionJob = CoroutineScope(Dispatchers.IO).launch {
             _connectionStatus.value = MoqConnectionStatus.CONNECTING
             try {
@@ -55,7 +65,7 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
     @Suppress("unused") // Called from native code
     private fun onConnectionStatusChanged(status: Int) {
         Log.i(TAG, "Connection status changed to: $status")
-        _connectionStatus.value = when (status) {
+        val mapped = when (status) {
             0 -> MoqConnectionStatus.IDLE
             1 -> MoqConnectionStatus.CONNECTING
             2 -> MoqConnectionStatus.CONNECTED
@@ -63,6 +73,24 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
             4 -> MoqConnectionStatus.ERROR
             else -> MoqConnectionStatus.ERROR
         }
+
+        // Once CONNECTED, ignore an uncorroborated downgrade to IDLE/CONNECTING
+        // (libquicr emits a transient kNotConnected after a healthy connect while
+        // media keeps flowing). Only DISCONNECTED/ERROR can clear the latch.
+        if (connectionLatched &&
+            (mapped == MoqConnectionStatus.IDLE || mapped == MoqConnectionStatus.CONNECTING)
+        ) {
+            Log.w(TAG, "Ignoring uncorroborated status $mapped (native=$status) while connection is latched")
+            return
+        }
+
+        if (mapped == MoqConnectionStatus.CONNECTED) {
+            connectionLatched = true
+        } else if (mapped == MoqConnectionStatus.DISCONNECTED || mapped == MoqConnectionStatus.ERROR) {
+            connectionLatched = false
+        }
+
+        _connectionStatus.value = mapped
     }
 
     @Suppress("unused") // Called from native code
@@ -79,6 +107,7 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
 
     override fun disconnect() {
         connectionJob?.cancel()
+        connectionLatched = false
         if (nativePtr != 0L) {
             nativeDisconnect(nativePtr)
             nativePtr = 0
