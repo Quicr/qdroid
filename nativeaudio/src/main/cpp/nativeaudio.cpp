@@ -13,9 +13,15 @@
 #include <oboe/Oboe.h>
 #include <opus.h>
 #include "lockfree_queue.h"
+// libfvad's fvad.h has no extern "C" guard of its own, so wrap it to keep the
+// C symbols unmangled when consumed from this C++ translation unit.
+extern "C" {
+#include "fvad.h"
+}
 
 #define TAG "NativeAudio"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, TAG, __VA_ARGS__)
 
@@ -32,13 +38,92 @@ constexpr int PCM_BUFFER_SIZE = FRAME_SIZE * CHANNELS * sizeof(int16_t);
 // Lockless queue configuration
 constexpr uint32_t QUEUE_CAPACITY = 256; // Must be power of 2
 
+// Voice Activity Detection (libfvad) configuration.
+// Replaces the former Kotlin android-vad path: VAD now runs natively on raw PCM
+// right before Opus encoding, so silent frames are never encoded or sent across
+// the JNI boundary. One 48 kHz / 960-sample frame is exactly 20 ms, which is a
+// valid libfvad frame length, so no resampling or re-framing is needed.
+constexpr int VAD_MODE = 3;              // 3 = "very aggressive" (matches prior VERY_AGGRESSIVE)
+constexpr int VAD_FRAME_MS = (FRAME_SIZE * 1000) / SAMPLE_RATE; // 20 ms per frame
+constexpr int VAD_SPEECH_TRIGGER_MS = 50;   // min continuous speech to open the gate
+constexpr int VAD_SILENCE_HANGOVER_MS = 300; // min continuous silence to close the gate
+
+// Thin wrapper over libfvad that adds the same speech/silence hysteresis the
+// android-vad "continuous speech" mode provided. All state is owned by the
+// single encode thread, so no locking is required here.
+class NativeVad {
+public:
+    NativeVad() {
+        vad_ = fvad_new();
+        if (vad_) {
+            fvad_set_sample_rate(vad_, SAMPLE_RATE);
+            fvad_set_mode(vad_, VAD_MODE);
+        } else {
+            LOGE("NativeVad - fvad_new() failed; VAD will fail open (transmit all)");
+        }
+    }
+
+    ~NativeVad() {
+        if (vad_) {
+            fvad_free(vad_);
+            vad_ = nullptr;
+        }
+    }
+
+    // Returns true if this frame should be transmitted (speech active, including
+    // the trailing hangover). Fails open (true) if the detector is unavailable or
+    // the frame is rejected, so audio is never silently lost on error.
+    bool shouldTransmit(const int16_t* frame, size_t length) {
+        if (!vad_) return true;
+
+        int raw = fvad_process(vad_, frame, length);
+        if (raw < 0) return true; // invalid frame length — shouldn't happen at 960
+
+        if (raw == 1) {
+            silenceMs_ = 0;
+            speechMs_ += VAD_FRAME_MS;
+            if (!active_ && speechMs_ >= VAD_SPEECH_TRIGGER_MS) {
+                active_ = true;
+            }
+        } else {
+            speechMs_ = 0;
+            silenceMs_ += VAD_FRAME_MS;
+            if (active_ && silenceMs_ >= VAD_SILENCE_HANGOVER_MS) {
+                active_ = false;
+            }
+        }
+        return active_;
+    }
+
+    // Clear hysteresis/history so a freshly re-enabled gate starts clean.
+    void reset() {
+        if (vad_) fvad_reset(vad_);
+        active_ = false;
+        speechMs_ = 0;
+        silenceMs_ = 0;
+    }
+
+private:
+    Fvad* vad_ = nullptr;
+    bool active_ = false; // latched speaking state (with hangover)
+    int speechMs_ = 0;
+    int silenceMs_ = 0;
+};
+
 class AudioCapture : public AudioStreamCallback {
 public:
-    AudioCapture(JNIEnv* env, jobject callback) {
+    AudioCapture(JNIEnv* env, jobject callback, bool initialVadEnabled) {
         env->GetJavaVM(&jvm);
         this->callback = env->NewGlobalRef(callback);
         jclass clazz = env->GetObjectClass(callback);
         onAudioEncodedId = env->GetMethodID(clazz, "onAudioEncoded", "(Ljava/nio/ByteBuffer;IJI)V");
+        vadEnabled.store(initialVadEnabled);
+    }
+
+    // Toggle VAD at runtime (called from the JNI thread). The encode thread
+    // observes the change and resets the detector on a disabled->enabled edge.
+    void setVadEnabled(bool enabled) {
+        vadEnabled.store(enabled);
     }
 
     ~AudioCapture() {
@@ -51,6 +136,13 @@ public:
 
         if (encodeThread.joinable()) {
             encodeThread.join();
+        }
+
+        // Safe to read stats here: the encode thread (sole writer) has joined.
+        if (framesProcessed > 0) {
+            double dropRate = (framesDropped * 100.0) / framesProcessed;
+            LOGI("VAD session stats: dropped=%lld/%lld (%.1f%%)",
+                 (long long)framesDropped, (long long)framesProcessed, dropRate);
         }
 
         if (encoder) {
@@ -137,7 +229,13 @@ private:
     std::shared_ptr<AudioStream> stream;
     OpusEncoder* encoder = nullptr;
     std::atomic<bool> isRunning{false};
+    std::atomic<bool> vadEnabled{true};
     std::thread encodeThread;
+
+    // VAD state and stats — owned exclusively by the encode thread.
+    NativeVad vad;
+    int64_t framesProcessed = 0;
+    int64_t framesDropped = 0;
 
     LockFreeQueue<std::vector<int16_t>, QUEUE_CAPACITY> pcmQueue;
 
@@ -145,12 +243,35 @@ private:
         std::vector<int16_t> pcmData;
         std::vector<uint8_t> opusData(MAX_PACKET_SIZE);
         int frameCount = 0;
+        bool prevVadEnabled = vadEnabled.load(std::memory_order_relaxed);
 
         while (isRunning) {
             if (pcmQueue.pop(pcmData)) {
                 if (pcmData.size() != FRAME_SIZE) {
                     LOGW("AudioCapture::encodeLoop() - Unexpected frame size: %zu", pcmData.size());
                     continue;
+                }
+
+                framesProcessed++;
+
+                // Voice Activity Detection on raw PCM, before Opus encoding.
+                // Silent frames are dropped here, so they are never encoded nor
+                // pushed across JNI — removing the former Kotlin-on-encoded-bytes
+                // hop and the encode cost of silence.
+                bool curVadEnabled = vadEnabled.load(std::memory_order_relaxed);
+                if (curVadEnabled && !prevVadEnabled) {
+                    vad.reset(); // re-enabled: start the hysteresis clean
+                }
+                prevVadEnabled = curVadEnabled;
+
+                if (curVadEnabled && !vad.shouldTransmit(pcmData.data(), FRAME_SIZE)) {
+                    framesDropped++;
+                    if (framesProcessed % 100 == 0) {
+                        double dropRate = (framesDropped * 100.0) / framesProcessed;
+                        LOGD("VAD stats: dropped=%lld/%lld (%.1f%%)",
+                             (long long)framesDropped, (long long)framesProcessed, dropRate);
+                    }
+                    continue; // silence — skip encode + callback
                 }
 
                 // Encode with Opus
@@ -344,10 +465,10 @@ extern "C" {
     }
 
     JNIEXPORT jboolean JNICALL
-    Java_com_cisco_nativeaudio_NativeAudioLib_startCapture(JNIEnv* env, jobject, jobject callback) {
+    Java_com_cisco_nativeaudio_NativeAudioLib_startCapture(JNIEnv* env, jobject, jobject callback, jboolean vadEnabled) {
         std::lock_guard<std::mutex> lock(gPlaybackMutex);
         if (gCapture) return JNI_TRUE;
-        gCapture = std::make_unique<AudioCapture>(env, callback);
+        gCapture = std::make_unique<AudioCapture>(env, callback, vadEnabled == JNI_TRUE);
         return gCapture->start() ? JNI_TRUE : JNI_FALSE;
     }
 
@@ -355,6 +476,14 @@ extern "C" {
     Java_com_cisco_nativeaudio_NativeAudioLib_stopCapture(JNIEnv*, jobject) {
         std::lock_guard<std::mutex> lock(gPlaybackMutex);
         gCapture.reset();
+    }
+
+    JNIEXPORT void JNICALL
+    Java_com_cisco_nativeaudio_NativeAudioLib_setVadEnabled(JNIEnv*, jobject, jboolean enabled) {
+        std::lock_guard<std::mutex> lock(gPlaybackMutex);
+        if (gCapture) {
+            gCapture->setVadEnabled(enabled == JNI_TRUE);
+        }
     }
 
     JNIEXPORT jboolean JNICALL

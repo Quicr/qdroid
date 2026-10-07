@@ -122,8 +122,8 @@ dependencies {
     // moqcatalog submodule
     implementation(project(":moqcatalog"))
 
-    // Voice Activity Detection
-    implementation("com.github.gkonovalov.android-vad:webrtc:2.0.10")
+    // Voice Activity Detection runs natively (libfvad in :nativeaudio); no
+    // JVM VAD dependency is required.
 
     // Coil for Compose
     implementation(libs.coil.compose)

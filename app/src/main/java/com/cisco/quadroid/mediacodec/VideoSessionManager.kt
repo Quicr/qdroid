@@ -30,6 +30,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.nio.ByteBuffer
 import javax.inject.Inject
@@ -299,10 +300,13 @@ class VideoSessionManager @Inject constructor(
             }
         } ?: Log.e(tag, "Cannot setup camera - no active encoder surface available")
 
-        if (moqTransport.connectionStatus.value != MoqConnectionStatus.CONNECTED) {
-            connectToRelay(relayUrl)
-        }
-
+        // Publishing tracks and subscribing to the meeting namespace both create QUIC
+        // streams in the native transport, which requires an established connection.
+        // Calling them before the connection is CONNECTED makes libmoq_jni throw across
+        // the JNI boundary and abort the process (SIGABRT in
+        // PicoQuicTransport::CreateStreamOnPqThread). Capture the work in a lambda and
+        // run it only once the connection (and catalog) are ready.
+        val beginPublishAndSubscribe = {
         // Subscribe to meeting namespace to discover all participants
         // Extract common parent namespace to cover all quality levels
         // From cisco.webex.com/nab/v1/avc1/1080 -> cisco.webex.com/nab/v1
@@ -466,6 +470,24 @@ class VideoSessionManager @Inject constructor(
 
         // Start periodic jitter buffer monitoring
         startJitterBufferMonitoring()
+        }
+
+        if (moqTransport.connectionStatus.value == MoqConnectionStatus.CONNECTED) {
+            beginPublishAndSubscribe()
+        } else {
+            // Not connected yet (e.g. starting a call before the relay handshake has
+            // completed, or after a drop). Connect, then run once CONNECTED and the
+            // catalog is loaded — this avoids the native stream-creation crash and the
+            // empty-catalog race (no namespaces/tracks to subscribe or publish).
+            Log.i(tag, "Transport not connected; deferring publish/subscribe until CONNECTED")
+            connectToRelay(relayUrl)
+            scope.launch {
+                moqTransport.connectionStatus.first { it == MoqConnectionStatus.CONNECTED }
+                _isCatalogReady.first { it }
+                Log.i(tag, "Connection and catalog ready; starting publish/subscribe")
+                beginPublishAndSubscribe()
+            }
+        }
     }
 
     /**

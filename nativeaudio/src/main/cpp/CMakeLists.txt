@@ -11,6 +11,9 @@ project("nativeaudio")
 # Include oboe
 add_subdirectory(oboe)
 
+# Include vendored libfvad (WebRTC Voice Activity Detection as a standalone C lib)
+add_subdirectory(libfvad)
+
 # Fetch and build Opus
 include(FetchContent)
 FetchContent_Declare(
@@ -39,7 +42,8 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     android
     oboe
     log
-    opus)
+    opus
+    fvad)  # libfvad exports its include dir, so fvad.h resolves via this link
 
 # Add oboe's include directory to our search path
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE

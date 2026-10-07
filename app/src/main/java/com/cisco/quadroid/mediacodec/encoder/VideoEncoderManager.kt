@@ -42,8 +42,26 @@ class VideoEncoderManager(
         get() = encoders.getOrNull(activeEncoderIndex)?.inputSurface
 
     fun setupEncoders(configs: List<VideoEncoderConfig>) {
+        // Catalog updates fire repeatedly (every refresh/delta), each invoking this
+        // method. Rebuilding encoders every time leaks MediaCodec instances and exhausts
+        // the hardware codec pool, so start() throws CodecException and the native codec
+        // layer eventually crashes the app. Skip re-setup when the config is unchanged.
+        if (encoders.isNotEmpty() && encoders.map { it.config } == configs) {
+            Log.d(tag, "Encoders already set up for current configs (${encoders.size}); skipping re-setup")
+            return
+        }
+
+        // Config actually changed: release the previous encoders before creating new
+        // ones so codec instances don't accumulate across catalog updates.
+        if (encoders.isNotEmpty()) {
+            Log.i(tag, "Reconfiguring encoders: releasing ${encoders.size} existing encoder(s)")
+            cleanup()
+        }
+
         // Create one encoder per video quality level
         configs.forEach { config ->
+            var encoder: MediaCodec? = null
+            var inputSurface: Surface? = null
             try {
                 val format = MediaFormat.createVideoFormat(
                     videoMimeType,
@@ -63,7 +81,7 @@ class VideoEncoderManager(
                 // Create framer for this track
                 val framer = MoqMediaFramer(moqTransport, config.trackNameUrl)
 
-                val encoder = MediaCodec.createEncoderByType(videoMimeType).apply {
+                val codec = MediaCodec.createEncoderByType(videoMimeType).apply {
                     setCallback(object : MediaCodec.Callback() {
                         override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {}
                         override fun onOutputBufferAvailable(
@@ -126,13 +144,15 @@ class VideoEncoderManager(
                     }, encoderHandler)
                     configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 }
+                encoder = codec
 
-                val inputSurface = encoder.createInputSurface()
-                encoder.start()
+                val surface = codec.createInputSurface()
+                inputSurface = surface
+                codec.start()
 
                 val encoderState = EncoderState(
-                    encoder = encoder,
-                    inputSurface = inputSurface,
+                    encoder = codec,
+                    inputSurface = surface,
                     config = config,
                     framer = framer
                 )
@@ -144,6 +164,10 @@ class VideoEncoderManager(
                 )
             } catch (e: Exception) {
                 Log.e(tag, "Failed to setup video encoder for ${config.trackNameUrl}", e)
+                // Release the half-initialized codec/surface so a failed start() does
+                // not leak a MediaCodec instance (which would worsen pool exhaustion).
+                try { inputSurface?.release() } catch (_: Exception) {}
+                try { encoder?.release() } catch (_: Exception) {}
             }
         }
 
