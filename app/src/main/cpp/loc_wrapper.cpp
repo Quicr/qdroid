@@ -130,7 +130,7 @@ LocUnwrapResult LocWrapper::unwrap(
                         result.metadata.captureTimestampUs = *val_result;
                     } else if (id == loc::property_id::video_frame_marking) {
                         auto marking = loc::video_frame_marking::decode(*val_result);
-                        result.metadata.isKeyframe = marking.independent;
+                        result.metadata.isKeyframe = marking->independent;
                         result.metadata.mediaType = MediaType::Video;
                     } else if (id == loc::property_id::audio_level) {
                         result.metadata.mediaType = MediaType::Audio;

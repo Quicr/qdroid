@@ -1221,15 +1221,6 @@ fun SettingsScreen(
             )
         ),
         RelaySection(
-            title = "NAB_CISCO",
-            urls = listOf(
-                "moq://lax1.cisco.moqx.akaleapi.net:9667/",
-                "moq://lax1.cisco.moqx.akaleapi.net:9668/",
-                "moq://lax2.cisco.moqx.akaleapi.net:9667/",
-                "moq://lax2.cisco.moqx.akaleapi.net:9668/"
-            )
-        ),
-        RelaySection(
             title = "DEV",
             urls = listOf("moq://suhas-build-vm.akaleapi.net:443/moq-relay")
         ),

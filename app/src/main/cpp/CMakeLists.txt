@@ -25,11 +25,12 @@ FetchContent_Declare(
     GIT_TAG        main
 )
 
-# BoringSSL support (boring2 branch as requested)
+
+# BoringSSL support (Move to an independent fork of libquicr until official Android support in libquicr is implemented)
 FetchContent_Declare(
     libquicr
-    GIT_REPOSITORY git@github.com:Quicr/libquicr.git
-    GIT_TAG        boring2
+    GIT_REPOSITORY git@github.com:Quicr/libquicr-mirror.git
+    GIT_TAG        draft-18-android
     GIT_SUBMODULES_RECURSE TRUE
 )
 
@@ -58,17 +59,9 @@ if(NOT loc-cpp_POPULATED)
     add_subdirectory(${loc-cpp_SOURCE_DIR} ${loc-cpp_BINARY_DIR})
 endif()
 
-# Fetch libquicr but don't make available yet (so we can patch it)
-FetchContent_GetProperties(libquicr)
-if(NOT libquicr_POPULATED)
-    FetchContent_Populate(libquicr)
-
-    # Apply patch to fix boring2 branch CMakeLists.txt bug
-    include(${CMAKE_CURRENT_SOURCE_DIR}/patch_libquicr.cmake)
-
-    # Now add the subdirectory
-    add_subdirectory(${libquicr_SOURCE_DIR} ${libquicr_BINARY_DIR})
-endif()
+# libquicr is consumed as-is from the androidSupport branch; all Android build
+# accommodations live in the branch itself, so no local patching is required.
+FetchContent_MakeAvailable(libquicr)
 
 add_library(moq_jni SHARED
     moq_jni.cpp

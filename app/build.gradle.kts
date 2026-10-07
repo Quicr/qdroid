@@ -14,18 +14,26 @@ android {
     namespace = "com.cisco.quadroid"
     compileSdk = 35
 
+    packagingOptions.resources.merges.addAll(listOf("META-INF/LICENSE.md", "META-INF/LICENSE-notice.md"))
+
     defaultConfig {
         applicationId = "com.cisco.quadroid"
         minSdk = 30
         targetSdk = 35
         versionCode = 1
-        versionName = "1.0"
+        versionName = "1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Cloudflare relay feature flag
         buildConfigField("Boolean", "ENABLE_CLOUDFLARE", "false")
         
+        // libquicr only supports 64-bit builds (32-bit ABIs hit narrowing bugs in
+        // its containers). All devices at minSdk 30+ are 64-bit capable.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+
         externalNativeBuild {
             cmake {
                 cppFlags("-std=c++20")

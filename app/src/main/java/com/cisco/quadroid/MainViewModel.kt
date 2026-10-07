@@ -3,6 +3,9 @@
 
 package com.cisco.quadroid
 
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -22,7 +25,7 @@ class MainViewModel @Inject constructor(
 ) : ViewModel() {
 
     //Relay config - Managed via settings
-    var relay_url: String = "moq://eng-3.us-west-2.m10x.org:33550"
+    var relay_url by mutableStateOf("moq://eng-3.us-west-2.m10x.org:33550")
     private var last_connected_url: String? = null
 
 

@@ -1,0 +1,90 @@
+<svg width="108" height="108" viewBox="0 0 108 108" xmlns="http://www.w3.org/2000/svg">
+  <!-- Android Adaptive Icon - Combined Preview -->
+  <!-- Minimalist Material You design for MoQ video conferencing -->
+  <!-- Dark blue and yellow color scheme -->
+  <!-- Properly sized according to Android guidelines -->
+
+  <!-- Background Layer: Dark Blue -->
+  <rect width="108" height="108" fill="#0a1628"/>
+
+  <!-- Foreground Layer -->
+  <!-- Network connection lines -->
+  <g opacity="0.6">
+    <!-- Lines radiating from center to nodes (8 directions) -->
+    <line x1="54" y1="54" x2="32.88" y2="32.88" stroke="#FCD34D" stroke-width="1" stroke-linecap="round"/>
+    <line x1="54" y1="54" x2="54" y2="24" stroke="#FCD34D" stroke-width="1" stroke-linecap="round"/>
+    <line x1="54" y1="54" x2="75.12" y2="32.88" stroke="#FCD34D" stroke-width="1" stroke-linecap="round"/>
+
+    <line x1="54" y1="54" x2="24" y2="54" stroke="#FCD34D" stroke-width="1" stroke-linecap="round"/>
+    <line x1="54" y1="54" x2="84" y2="54" stroke="#FCD34D" stroke-width="1" stroke-linecap="round"/>
+
+    <line x1="54" y1="54" x2="32.88" y2="75.12" stroke="#FCD34D" stroke-width="1" stroke-linecap="round"/>
+    <line x1="54" y1="54" x2="54" y2="84" stroke="#FCD34D" stroke-width="1" stroke-linecap="round"/>
+    <line x1="54" y1="54" x2="75.12" y2="75.12" stroke="#FCD34D" stroke-width="1" stroke-linecap="round"/>
+  </g>
+
+  <!-- Network nodes (8 points, 30dp radius from center) -->
+  <g>
+    <!-- Outer glow -->
+    <circle cx="32.88" cy="32.88" r="3" fill="#FBBF24" opacity="0.5"/>
+    <circle cx="54" cy="24" r="3" fill="#FBBF24" opacity="0.5"/>
+    <circle cx="75.12" cy="32.88" r="3" fill="#FBBF24" opacity="0.5"/>
+    <circle cx="24" cy="54" r="3" fill="#FBBF24" opacity="0.5"/>
+    <circle cx="84" cy="54" r="3" fill="#FBBF24" opacity="0.5"/>
+    <circle cx="32.88" cy="75.12" r="3" fill="#FBBF24" opacity="0.5"/>
+    <circle cx="54" cy="84" r="3" fill="#FBBF24" opacity="0.5"/>
+    <circle cx="75.12" cy="75.12" r="3" fill="#FBBF24" opacity="0.5"/>
+
+    <!-- Inner bright nodes -->
+    <circle cx="32.88" cy="32.88" r="2.2" fill="#FCD34D"/>
+    <circle cx="54" cy="24" r="2.2" fill="#FCD34D"/>
+    <circle cx="75.12" cy="32.88" r="2.2" fill="#FCD34D"/>
+    <circle cx="24" cy="54" r="2.2" fill="#FCD34D"/>
+    <circle cx="84" cy="54" r="2.2" fill="#FCD34D"/>
+    <circle cx="32.88" cy="75.12" r="2.2" fill="#FCD34D"/>
+    <circle cx="54" cy="84" r="2.2" fill="#FCD34D"/>
+    <circle cx="75.12" cy="75.12" r="2.2" fill="#FCD34D"/>
+  </g>
+
+  <!-- Central broadcast/streaming icon -->
+  <g transform="translate(54, 54)">
+
+    <!-- Outer broadcast ring (representing transmission) -->
+    <circle cx="0" cy="0" r="18"
+            fill="none"
+            stroke="#FCD34D"
+            stroke-width="3"
+            opacity="0.35"/>
+
+    <!-- Middle ring -->
+    <circle cx="0" cy="0" r="13"
+            fill="none"
+            stroke="#FCD34D"
+            stroke-width="2.8"
+            opacity="0.7"/>
+
+    <!-- Video play symbol (solid triangle pointing right) -->
+    <!-- Represents streaming/video content -->
+    <path d="M -5,-7 L -5,7 L 8,0 Z"
+          fill="#FCD34D"
+          opacity="1"/>
+
+    <!-- Small recording indicator dot (top right) -->
+    <circle cx="13" cy="-13" r="3.2"
+            fill="#EF4444"/>
+    <circle cx="13" cy="-13" r="1.5"
+            fill="#FCD34D"
+            opacity="0.95"/>
+  </g>
+
+  <!-- Safe zone guides (for testing) -->
+  <!-- 66dp safe zone circle (33dp radius) -->
+  <circle cx="54" cy="54" r="33" fill="none" stroke="#FCD34D" stroke-width="0.4" opacity="0.3" stroke-dasharray="2,2"/>
+  <!-- 72dp recommended content circle (36dp radius) -->
+  <circle cx="54" cy="54" r="36" fill="none" stroke="#FBBF24" stroke-width="0.4" opacity="0.3" stroke-dasharray="1,1"/>
+
+  <!-- Labels -->
+  <text x="54" y="16" font-family="sans-serif" font-size="3.5" fill="#FBBF24" text-anchor="middle" opacity="0.6">Android Adaptive Icon Guidelines</text>
+  <text x="54" y="92" font-family="sans-serif" font-size="3" fill="#FCD34D" text-anchor="middle" opacity="0.6">Safe zone: 66dp | Content zone: 72dp</text>
+
+</svg>
