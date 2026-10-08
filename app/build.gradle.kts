@@ -21,7 +21,7 @@ android {
         minSdk = 30
         targetSdk = 35
         versionCode = 1
-        versionName = "1.1"
+        versionName = "1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -66,6 +66,9 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
     externalNativeBuild {
         cmake {
@@ -122,8 +125,8 @@ dependencies {
     // moqcatalog submodule
     implementation(project(":moqcatalog"))
 
-    // Voice Activity Detection
-    implementation("com.github.gkonovalov.android-vad:webrtc:2.0.10")
+    // Voice Activity Detection runs natively (libfvad in :nativeaudio); no
+    // JVM VAD dependency is required.
 
     // Coil for Compose
     implementation(libs.coil.compose)

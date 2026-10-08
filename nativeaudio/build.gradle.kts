@@ -74,3 +74,49 @@ afterEvaluate {
     tasks.findByName("connectedAndroidTest")?.enabled = false
     tasks.findByName("connectedDebugAndroidTest")?.enabled = false
 }
+
+// ---------------------------------------------------------------------------
+// Host unit tests for the native VAD logic (VadGate, see src/main/cpp/vad_gate.h).
+//
+// The Android externalNativeBuild cross-compiles for the device and can't run the
+// tests, and Gradle's JVM `Test` tasks are disabled above. So these are wired as
+// plain Exec tasks that compile and run the test on the build machine with the host
+// C++ compiler (override with -PcxxCompiler=... or the CXX env var). CMake is not
+// required (src/test/cpp/CMakeLists.txt remains available for IDE/manual use).
+// ---------------------------------------------------------------------------
+val hostCxx = (project.findProperty("cxxCompiler") as String?)
+    ?: System.getenv("CXX")
+    ?: "c++"
+
+val vadTestOutputDir = layout.buildDirectory.dir("vad-host-tests")
+val vadTestBinary = vadTestOutputDir.map { it.file("vad_gate_test") }
+
+val compileVadHostTest by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Compiles the native VAD (VadGate) host unit tests."
+
+    val testSource = file("src/test/cpp/vad_gate_test.cpp")
+    inputs.file(testSource)
+    inputs.file("src/main/cpp/vad_gate.h")
+    outputs.file(vadTestBinary)
+
+    doFirst { vadTestOutputDir.get().asFile.mkdirs() }
+    commandLine(
+        hostCxx, "-std=c++17", "-Wall", "-Wextra",
+        "-I", file("src/main/cpp").absolutePath,
+        testSource.absolutePath,
+        "-o", vadTestBinary.get().asFile.absolutePath
+    )
+}
+
+val vadHostTest by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Runs the native VAD (VadGate) host unit tests."
+    dependsOn(compileVadHostTest)
+    commandLine(vadTestBinary.get().asFile.absolutePath)
+}
+
+// Run the native VAD tests as part of `check` (and therefore `build`).
+tasks.named("check") {
+    dependsOn(vadHostTest)
+}

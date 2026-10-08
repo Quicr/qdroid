@@ -30,7 +30,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -79,6 +81,9 @@ class VideoSessionManager @Inject constructor(
     private val tag = "VideoSessionManager"
 
     // Coroutine scope for observing connection status
+    // Scope for deferred native publish/subscribe and catalog subscription. These create
+    // QUIC streams in libquicr, which is thread-sensitive and must run on the main thread
+    // (same thread as connect) — running it elsewhere breaks stream-based video publishing.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     // Multi-quality video encoder configuration
@@ -271,24 +276,31 @@ class VideoSessionManager @Inject constructor(
      * @param rotation Screen rotation in degrees (0, 90, 180, 270) for camera orientation
      * @param relayUrl WebSocket URL of the relay server
      */
-    fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String) {
+    suspend fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String) {
         Log.e("QUADROID_DEBUG", "╔════════════════════════════════════════╗")
         Log.e("QUADROID_DEBUG", "║    START SESSION CALLED               ║")
         Log.e("QUADROID_DEBUG", "╚════════════════════════════════════════╝")
         Log.e(tag, "⭐ startSession: relayUrl=$relayUrl, deviceId=$deviceId")
 
-        cleanup()
-
-        Log.i(tag, "Starting session with deviceId: $deviceId")
-        Log.i(tag, "Local tracks from catalog: ${catalogManager.catalogTrackNamesUrl.joinToString(", ")}")
-
         this.lifecycleOwner = lifecycleOwner
         this.rotation = rotation
 
-        // Recreate encoders if they were destroyed during cleanup
-        if (videoEncoderConfigs.isNotEmpty() && videoEncoderManager.activeInputSurface == null) {
-            Log.i(tag, "Recreating encoders after cleanup")
-            videoEncoderManager.setupEncoders(videoEncoderConfigs)
+        // Heavy, thread-agnostic setup (MediaCodec release + create x3, audio teardown) is
+        // the main-thread jank/ANR source, so run it off the main thread. The native MoQ
+        // publish/subscribe below must NOT move off-main: libquicr's stream-based publish is
+        // thread-sensitive (see PicoQuicTransport::CreateStreamOnPqThread) and running it on
+        // a worker thread silently breaks stream video — only datagram audio survives.
+        withContext(Dispatchers.Default) {
+            cleanup()
+
+            Log.i(tag, "Starting session with deviceId: $deviceId")
+            Log.i(tag, "Local tracks from catalog: ${catalogManager.catalogTrackNamesUrl.joinToString(", ")}")
+
+            // Recreate encoders if they were destroyed during cleanup
+            if (videoEncoderConfigs.isNotEmpty() && videoEncoderManager.activeInputSurface == null) {
+                Log.i(tag, "Recreating encoders after cleanup")
+                videoEncoderManager.setupEncoders(videoEncoderConfigs)
+            }
         }
 
         // Setup camera with active encoder surface
@@ -299,10 +311,13 @@ class VideoSessionManager @Inject constructor(
             }
         } ?: Log.e(tag, "Cannot setup camera - no active encoder surface available")
 
-        if (moqTransport.connectionStatus.value != MoqConnectionStatus.CONNECTED) {
-            connectToRelay(relayUrl)
-        }
-
+        // Publishing tracks and subscribing to the meeting namespace both create QUIC
+        // streams in the native transport, which requires an established connection.
+        // Calling them before the connection is CONNECTED makes libmoq_jni throw across
+        // the JNI boundary and abort the process (SIGABRT in
+        // PicoQuicTransport::CreateStreamOnPqThread). Capture the work in a lambda and
+        // run it only once the connection (and catalog) are ready.
+        val beginPublishAndSubscribe = {
         // Subscribe to meeting namespace to discover all participants
         // Extract common parent namespace to cover all quality levels
         // From cisco.webex.com/nab/v1/avc1/1080 -> cisco.webex.com/nab/v1
@@ -466,6 +481,24 @@ class VideoSessionManager @Inject constructor(
 
         // Start periodic jitter buffer monitoring
         startJitterBufferMonitoring()
+        }
+
+        if (moqTransport.connectionStatus.value == MoqConnectionStatus.CONNECTED) {
+            beginPublishAndSubscribe()
+        } else {
+            // Not connected yet (e.g. starting a call before the relay handshake has
+            // completed, or after a drop). Connect, then run once CONNECTED and the
+            // catalog is loaded — this avoids the native stream-creation crash and the
+            // empty-catalog race (no namespaces/tracks to subscribe or publish).
+            Log.i(tag, "Transport not connected; deferring publish/subscribe until CONNECTED")
+            connectToRelay(relayUrl)
+            scope.launch {
+                moqTransport.connectionStatus.first { it == MoqConnectionStatus.CONNECTED }
+                _isCatalogReady.first { it }
+                Log.i(tag, "Connection and catalog ready; starting publish/subscribe")
+                beginPublishAndSubscribe()
+            }
+        }
     }
 
     /**
@@ -489,6 +522,14 @@ class VideoSessionManager @Inject constructor(
      */
     fun setLocalPreviewSurface(surface: Surface) {
         cameraManager.setLocalPreviewSurface(surface)
+    }
+
+    /**
+     * Called when the local-preview UI surface goes away. Unbinds only the preview use
+     * case; the encoder keeps streaming so the outgoing video does not freeze.
+     */
+    fun removeLocalPreviewSurface() {
+        cameraManager.removeLocalPreviewSurface()
     }
 
     /**

@@ -267,6 +267,7 @@ fun MainScreen(viewModel: MainViewModel) {
                         isFrontCamera = isFrontCamera,
                         localAspectRatio = videoAspectRatio,
                         onLocalPreviewSurfaceReady = { surface -> viewModel.onLocalPreviewSurfaceReady(surface) },
+                        onLocalPreviewSurfaceDestroyed = { viewModel.onLocalPreviewSurfaceDestroyed() },
                         onToggleVideo = { viewModel.toggleVideo(lifecycleOwner) },
                         onSwitchCamera = { viewModel.switchCamera(lifecycleOwner) },
                         onToggleAudio = { viewModel.toggleAudio() },
@@ -695,6 +696,7 @@ fun InCallScreen(
     isFrontCamera: Boolean,
     localAspectRatio: Float,
     onLocalPreviewSurfaceReady: (Surface) -> Unit,
+    onLocalPreviewSurfaceDestroyed: () -> Unit,
     onToggleVideo: () -> Unit,
     onSwitchCamera: () -> Unit,
     onToggleAudio: () -> Unit,
@@ -729,7 +731,7 @@ fun InCallScreen(
                     key(videoToggleCount) {
                         PreviewNativeVideoRenderer(
                             onSurfaceCreated = onLocalPreviewSurfaceReady,
-                            onSurfaceDestroyed = { },
+                            onSurfaceDestroyed = onLocalPreviewSurfaceDestroyed,
                             modifier = Modifier.fillMaxSize(),
                             mirrorHorizontal = false, // Explicitly disabled mirroring
                             aspectRatio = localAspectRatio
@@ -776,7 +778,7 @@ fun InCallScreen(
                         key(videoToggleCount) {
                             PreviewNativeVideoRenderer(
                                 onSurfaceCreated = onLocalPreviewSurfaceReady,
-                                onSurfaceDestroyed = { },
+                                onSurfaceDestroyed = onLocalPreviewSurfaceDestroyed,
                                 modifier = Modifier.fillMaxSize(),
                                 mirrorHorizontal = false, // Explicitly disabled mirroring
                                 aspectRatio = localAspectRatio

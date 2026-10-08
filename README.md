@@ -14,7 +14,7 @@ QDroid is a cutting-edge Android video conferencing application that leverages t
 
 - 🚀 **Ultra-Low Latency** - Powered by Media over QUIC (MoQ) protocol for sub-second latency
 - 🎥 **Real-time Video/Audio** - High-quality H.264 video encoding with Opus audio codec
-- 🎙️ **Voice Activity Detection (VAD)** - Intelligent audio transmission with WebRTC VAD to reduce bandwidth
+- 🎙️ **Voice Activity Detection (VAD)** - Native VAD (libfvad) runs on raw PCM before Opus encoding, dropping silent frames to reduce bandwidth
 - 🔄 **Adaptive Grid Layout** - Dynamic participant layout supporting portrait and landscape modes
 - 📹 **Camera Control** - Seamless front/back camera switching with live preview
 - 🎤 **Audio Management** - Toggle microphone with native Oboe audio processing
@@ -121,7 +121,7 @@ For questions or support, please open an issue on GitHub.
 
 - [libquicr](https://github.com/Quicr/libquicr) - MoQ protocol implementation
 - [Google Oboe](https://github.com/google/oboe) - High-performance audio I/O
-- [android-vad](https://github.com/gkonovalov/android-vad) - Voice Activity Detection library
+- [libfvad](https://github.com/dpirch/libfvad) - Native Voice Activity Detection library
 - [Jetpack Compose](https://developer.android.com/jetpack/compose) - Modern UI toolkit
 
 ---
