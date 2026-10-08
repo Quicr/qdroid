@@ -65,6 +65,9 @@ class MainViewModel @Inject constructor(
     }
 
     fun startCall(lifecycleOwner: LifecycleOwner, rotation: Int) {
+        // Runs on the main dispatcher. startSession() offloads its heavy codec work to a
+        // background thread internally, but keeps the thread-sensitive native MoQ
+        // publish/subscribe on the main thread (required for stream-based video).
         viewModelScope.launch {
             videoSessionManager.startSession(lifecycleOwner, rotation, relay_url)
             _uiState.value = CallUiState.InCall
@@ -100,6 +103,10 @@ class MainViewModel @Inject constructor(
 
     fun onLocalPreviewSurfaceReady(surface: android.view.Surface) {
         videoSessionManager.setLocalPreviewSurface(surface)
+    }
+
+    fun onLocalPreviewSurfaceDestroyed() {
+        videoSessionManager.removeLocalPreviewSurface()
     }
 
     fun endCall() {

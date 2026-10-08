@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -80,6 +81,9 @@ class VideoSessionManager @Inject constructor(
     private val tag = "VideoSessionManager"
 
     // Coroutine scope for observing connection status
+    // Scope for deferred native publish/subscribe and catalog subscription. These create
+    // QUIC streams in libquicr, which is thread-sensitive and must run on the main thread
+    // (same thread as connect) — running it elsewhere breaks stream-based video publishing.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     // Multi-quality video encoder configuration
@@ -272,24 +276,31 @@ class VideoSessionManager @Inject constructor(
      * @param rotation Screen rotation in degrees (0, 90, 180, 270) for camera orientation
      * @param relayUrl WebSocket URL of the relay server
      */
-    fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String) {
+    suspend fun startSession(lifecycleOwner: LifecycleOwner, rotation: Int, relayUrl: String) {
         Log.e("QUADROID_DEBUG", "╔════════════════════════════════════════╗")
         Log.e("QUADROID_DEBUG", "║    START SESSION CALLED               ║")
         Log.e("QUADROID_DEBUG", "╚════════════════════════════════════════╝")
         Log.e(tag, "⭐ startSession: relayUrl=$relayUrl, deviceId=$deviceId")
 
-        cleanup()
-
-        Log.i(tag, "Starting session with deviceId: $deviceId")
-        Log.i(tag, "Local tracks from catalog: ${catalogManager.catalogTrackNamesUrl.joinToString(", ")}")
-
         this.lifecycleOwner = lifecycleOwner
         this.rotation = rotation
 
-        // Recreate encoders if they were destroyed during cleanup
-        if (videoEncoderConfigs.isNotEmpty() && videoEncoderManager.activeInputSurface == null) {
-            Log.i(tag, "Recreating encoders after cleanup")
-            videoEncoderManager.setupEncoders(videoEncoderConfigs)
+        // Heavy, thread-agnostic setup (MediaCodec release + create x3, audio teardown) is
+        // the main-thread jank/ANR source, so run it off the main thread. The native MoQ
+        // publish/subscribe below must NOT move off-main: libquicr's stream-based publish is
+        // thread-sensitive (see PicoQuicTransport::CreateStreamOnPqThread) and running it on
+        // a worker thread silently breaks stream video — only datagram audio survives.
+        withContext(Dispatchers.Default) {
+            cleanup()
+
+            Log.i(tag, "Starting session with deviceId: $deviceId")
+            Log.i(tag, "Local tracks from catalog: ${catalogManager.catalogTrackNamesUrl.joinToString(", ")}")
+
+            // Recreate encoders if they were destroyed during cleanup
+            if (videoEncoderConfigs.isNotEmpty() && videoEncoderManager.activeInputSurface == null) {
+                Log.i(tag, "Recreating encoders after cleanup")
+                videoEncoderManager.setupEncoders(videoEncoderConfigs)
+            }
         }
 
         // Setup camera with active encoder surface
@@ -511,6 +522,14 @@ class VideoSessionManager @Inject constructor(
      */
     fun setLocalPreviewSurface(surface: Surface) {
         cameraManager.setLocalPreviewSurface(surface)
+    }
+
+    /**
+     * Called when the local-preview UI surface goes away. Unbinds only the preview use
+     * case; the encoder keeps streaming so the outgoing video does not freeze.
+     */
+    fun removeLocalPreviewSurface() {
+        cameraManager.removeLocalPreviewSurface()
     }
 
     /**
