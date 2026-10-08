@@ -13,6 +13,7 @@
 #include <oboe/Oboe.h>
 #include <opus.h>
 #include "lockfree_queue.h"
+#include "vad_gate.h"
 // libfvad's fvad.h has no extern "C" guard of its own, so wrap it to keep the
 // C symbols unmangled when consumed from this C++ translation unit.
 extern "C" {
@@ -79,35 +80,20 @@ public:
         int raw = fvad_process(vad_, frame, length);
         if (raw < 0) return true; // invalid frame length — shouldn't happen at 960
 
-        if (raw == 1) {
-            silenceMs_ = 0;
-            speechMs_ += VAD_FRAME_MS;
-            if (!active_ && speechMs_ >= VAD_SPEECH_TRIGGER_MS) {
-                active_ = true;
-            }
-        } else {
-            speechMs_ = 0;
-            silenceMs_ += VAD_FRAME_MS;
-            if (active_ && silenceMs_ >= VAD_SILENCE_HANGOVER_MS) {
-                active_ = false;
-            }
-        }
-        return active_;
+        // The speech/silence hysteresis lives in VadGate (see vad_gate.h) so it can
+        // be unit-tested on the host independently of libfvad.
+        return gate_.update(raw == 1);
     }
 
     // Clear hysteresis/history so a freshly re-enabled gate starts clean.
     void reset() {
         if (vad_) fvad_reset(vad_);
-        active_ = false;
-        speechMs_ = 0;
-        silenceMs_ = 0;
+        gate_.reset();
     }
 
 private:
     Fvad* vad_ = nullptr;
-    bool active_ = false; // latched speaking state (with hangover)
-    int speechMs_ = 0;
-    int silenceMs_ = 0;
+    VadGate gate_{VAD_FRAME_MS, VAD_SPEECH_TRIGGER_MS, VAD_SILENCE_HANGOVER_MS};
 };
 
 class AudioCapture : public AudioStreamCallback {

@@ -6,6 +6,7 @@ package com.cisco.quadroid
 import androidx.lifecycle.LifecycleOwner
 import app.cash.turbine.test
 import com.cisco.quadroid.mediacodec.VideoSessionManager
+import io.mockk.coVerify
 import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
@@ -49,14 +50,24 @@ class MainViewModelTest {
             assertEquals(CallUiState.Lobby, awaitItem())
             viewModel.startCall(lifecycleOwner, 0)
             assertEquals(CallUiState.InCall, awaitItem())
-            verify { videoSessionManager.startSession(lifecycleOwner, 0, any()) }
+            coVerify { videoSessionManager.startSession(lifecycleOwner, 0, any()) }
         }
     }
 
     @Test
+    fun `setVadEnabled forwards to videoSessionManager`() {
+        viewModel.setVadEnabled(true)
+        verify(exactly = 1) { videoSessionManager.setVadEnabled(true) }
+
+        viewModel.setVadEnabled(false)
+        verify(exactly = 1) { videoSessionManager.setVadEnabled(false) }
+    }
+
+    @Test
     fun `endCall transitions back to Lobby and stops session`() = runTest {
-        viewModel.startCall(lifecycleOwner, 0)
         viewModel.uiState.test {
+            assertEquals(CallUiState.Lobby, awaitItem())
+            viewModel.startCall(lifecycleOwner, 0)
             assertEquals(CallUiState.InCall, awaitItem())
             viewModel.endCall()
             assertEquals(CallUiState.Lobby, awaitItem())

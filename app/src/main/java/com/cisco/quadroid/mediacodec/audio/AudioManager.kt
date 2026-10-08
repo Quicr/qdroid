@@ -14,16 +14,20 @@ import java.nio.ByteBuffer
 
 class AudioManager(
     private val moqTransport: MoqTransport,
-    private val context: Context
+    private val context: Context,
+    // Injectable seams for unit testing; production uses the real native engine and
+    // the real Opus/MoQ audio framer.
+    private val audioEngine: NativeAudioEngine = DefaultNativeAudioEngine(),
+    private val audioFramerFactory: (MoqTransport, String) -> MoqAudioFramer =
+        { transport, trackName -> MoqAudioFramer(transport, trackName) }
 ) {
     private val tag = "AudioManager"
-    private val nativeAudioLib = NativeAudioLib()
     private var audioFramer: MoqAudioFramer? = null
     private var isMicEnabled = true
 
     fun startCapture(audioTrackName: String) {
         // Create audio framer for this track
-        audioFramer = MoqAudioFramer(moqTransport, audioTrackName)
+        audioFramer = audioFramerFactory(moqTransport, audioTrackName)
 
         // Voice Activity Detection now runs natively on raw PCM before Opus
         // encoding (libfvad), so silent frames are dropped in the native capture
@@ -31,7 +35,7 @@ class AudioManager(
         val vadEnabled = PreferencesManager.getVadEnabled(context)
 
         var callbackCount = 0
-        nativeAudioLib.startCapture(object : NativeAudioLib.NativeAudioCallback {
+        audioEngine.startCapture(object : NativeAudioLib.NativeAudioCallback {
             override fun onAudioEncoded(payload: ByteBuffer, size: Int, presentationTimeUs: Long, flags: Int) {
                 callbackCount++
 
@@ -52,7 +56,7 @@ class AudioManager(
     }
 
     fun stopCapture() {
-        nativeAudioLib.stopCapture()
+        audioEngine.stopCapture()
         audioFramer = null
         Log.i(tag, "Stopped native audio capture")
     }
@@ -69,7 +73,7 @@ class AudioManager(
      * @param enabled true to enable VAD (drop silence frames), false to send all frames
      */
     fun setVadEnabled(enabled: Boolean) {
-        nativeAudioLib.setVadEnabled(enabled)
+        audioEngine.setVadEnabled(enabled)
         Log.i(tag, "VAD ${if (enabled) "enabled" else "disabled"}")
     }
 }
