@@ -26,6 +26,12 @@
 // Global JVM reference (non-static to allow access from video_jitter_buffer.cpp)
 JavaVM* g_jvm = nullptr;
 
+// Per-object MoQ extension header id the relay ranks on for Top-N active-speaker
+// filtering. Carries the 3-value voice-activity state (0=speechEnd, 1=continuousSpeech,
+// 2=speechStart). Must match the relay's expected property type and the Kotlin
+// AppHeaders.AUDIO_ACTIVITY_INDICATOR constant.
+static constexpr uint64_t AUDIO_ACTIVITY_INDICATOR = 12;
+
 // Forward declarations
 class AndroidPublishTrackHandler;
 class AndroidSubscribeTrackHandler;
@@ -352,8 +358,9 @@ class AndroidSubscribeNamespaceHandler : public quicr::SubscribeNamespaceHandler
 {
 public:
     AndroidSubscribeNamespaceHandler(const quicr::TrackNamespace& prefix,
-                                     jobject callback_ref)
-      : quicr::SubscribeNamespaceHandler(prefix, quicr::SubscribeNamespaceHandler::Mode::kTracks)
+                                     jobject callback_ref,
+                                     const quicr::messages::Filter& filter = std::monostate{})
+      : quicr::SubscribeNamespaceHandler(prefix, quicr::SubscribeNamespaceHandler::Mode::kTracks, filter)
       , callback_ref_(callback_ref)
       , callback_valid_(true)
     {
@@ -361,10 +368,11 @@ public:
     }
 
     static std::shared_ptr<AndroidSubscribeNamespaceHandler> Create(const quicr::TrackNamespace& prefix,
-                                                                      jobject callback_ref)
+                                                                      jobject callback_ref,
+                                                                      const quicr::messages::Filter& filter = std::monostate{})
     {
         return std::shared_ptr<AndroidSubscribeNamespaceHandler>(
-            new AndroidSubscribeNamespaceHandler(prefix, callback_ref));
+            new AndroidSubscribeNamespaceHandler(prefix, callback_ref, filter));
     }
 
     jobject GetCallbackRef() const {
@@ -707,7 +715,26 @@ Java_com_cisco_quadroid_transport_MoqNative_nativePublishNamespace(JNIEnv *env, 
         context->publish_ns_handlers[prefix] = handler;
     }
 
-    context->session->PublishNamespace(handler);
+    // PublishNamespace can create a QUIC stream via CreateStreamOnPqThread, which throws
+    // PicoQuicException on a transient 100ms stream-creation miss. Guard + retry so a flaky
+    // Join does not abort the process.
+    bool announced = false;
+    for (int attempt = 0; attempt < 5 && !announced; ++attempt) {
+        try {
+            context->session->PublishNamespace(handler);
+            announced = true;
+        } catch (const std::exception& e) {
+            LOGW("nativePublishNamespace: threw on attempt %d for %s: %s", attempt, prefix.c_str(), e.what());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        } catch (...) {
+            LOGW("nativePublishNamespace: threw (unknown) on attempt %d for %s", attempt, prefix.c_str());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    if (!announced) {
+        LOGE("nativePublishNamespace: giving up announcing %s after retries", prefix.c_str());
+        return;
+    }
 
     LOGI("nativePublishNamespace: Announced namespace %s", prefix.c_str());
 }
@@ -750,7 +777,28 @@ Java_com_cisco_quadroid_transport_MoqNative_nativePublish(JNIEnv *env, jobject t
     );
 
     context->callbacks->add_publish_handler(name, handler);
-    context->session->PublishTrack(handler);
+
+    // PublishTrack can create a QUIC stream via CreateStreamOnPqThread, which throws
+    // PicoQuicException on a transient 100ms stream-creation miss. Guard + retry so a flaky
+    // Join degrades to a failed publish instead of aborting the process.
+    bool published = false;
+    for (int attempt = 0; attempt < 5 && !published; ++attempt) {
+        try {
+            context->session->PublishTrack(handler);
+            published = true;
+        } catch (const std::exception& e) {
+            LOGW("nativePublish: PublishTrack threw on attempt %d for %s: %s", attempt, name.c_str(), e.what());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        } catch (...) {
+            LOGW("nativePublish: PublishTrack threw (unknown) on attempt %d for %s", attempt, name.c_str());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    if (!published) {
+        LOGE("nativePublish: giving up publishing %s after retries", name.c_str());
+        context->callbacks->remove_publish_handler(name);
+        return;
+    }
 
     LOGI("nativePublish: Published track %s", name.c_str());
 }
@@ -783,7 +831,8 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
                                                            jlong object_id, jobject payload,
                                                            jint payload_size, jint priority,
                                                            jlong delivery_timeout_ms,
-                                                           jboolean use_datagram)
+                                                           jboolean use_datagram,
+                                                           jint activity_value)
 {
     auto context = reinterpret_cast<MoqContext *>(ptr);
     std::string name = jstring_to_string(env, track_name);
@@ -856,6 +905,15 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
         .extensions = std::nullopt,
         .immutable_extensions = std::nullopt
     };
+
+    // Top-N: stamp the current 3-value voice-activity state as a per-object MoQ extension
+    // header so the relay can rank this publisher. activity_value < 0 means "no header"
+    // (Top-N disabled) — the object is then byte-for-byte identical to the legacy path.
+    if (activity_value >= 0) {
+        quicr::Extensions extensions;
+        extensions[AUDIO_ACTIVITY_INDICATOR] = { { static_cast<uint8_t>(activity_value) } };
+        headers.extensions = std::move(extensions);
+    }
 
     try {
         quicr::BytesSpan data_span(locWrappedData.data(), locWrappedData.size());  // Use LOC-wrapped data
@@ -939,7 +997,10 @@ JNIEXPORT void JNICALL
 Java_com_cisco_quadroid_transport_MoqNative_nativeSubscribeNamespace(JNIEnv *env, jobject thiz,
                                                                    jlong ptr,
                                                                    jstring namespace_prefix,
-                                                                   jobject callback)
+                                                                   jobject callback,
+                                                                   jlong property_type,
+                                                                   jlong max_tracks,
+                                                                   jlong timeout_ms)
 {
     auto context = reinterpret_cast<MoqContext *>(ptr);
     std::string prefix = jstring_to_string(env, namespace_prefix);
@@ -954,14 +1015,52 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSubscribeNamespace(JNIEnv *env
     auto track_ns = make_track_namespace(prefix);
     jobject callback_ref = env->NewGlobalRef(callback);
 
-    auto handler = AndroidSubscribeNamespaceHandler::Create(track_ns, callback_ref);
+    // Top-N: when property_type >= 0 and max_tracks > 0, attach a relay-side TrackFilter so the
+    // relay forwards only the top max_tracks publishers ranked by the property. Otherwise no
+    // filter (std::monostate) — unchanged behavior, all matching tracks delivered.
+    quicr::messages::Filter filter = std::monostate{};
+    if (property_type >= 0 && max_tracks > 0) {
+        filter = quicr::messages::TrackFilter{
+            static_cast<std::uint64_t>(property_type),
+            static_cast<std::uint64_t>(max_tracks),
+            static_cast<std::uint64_t>(timeout_ms)
+        };
+        LOGI("nativeSubscribeNamespace: attaching TrackFilter(property=%lld, maxTracks=%lld, timeoutMs=%lld)",
+             (long long)property_type, (long long)max_tracks, (long long)timeout_ms);
+    }
+
+    auto handler = AndroidSubscribeNamespaceHandler::Create(track_ns, callback_ref, filter);
 
     {
         std::lock_guard<std::mutex> lock(context->ns_handlers_mutex);
         context->subscribe_ns_handlers[prefix] = handler;
     }
 
-    context->session->SubscribeNamespace(handler);
+    // SubscribeNamespace creates a QUIC request stream via CreateStreamOnPqThread, which waits
+    // only 100ms for the picoquic thread and throws PicoQuicException on a transient miss. An
+    // uncaught throw here aborts the whole process (SIGABRT), which showed up as a flaky crash
+    // on Join. Catch and retry a few times so a transient stream-creation timeout degrades to a
+    // failed subscribe instead of killing the app. The throw happens while creating the request
+    // stream (before the SUBSCRIBE_NAMESPACE is sent), so retrying is safe.
+    bool subscribed = false;
+    for (int attempt = 0; attempt < 5 && !subscribed; ++attempt) {
+        try {
+            context->session->SubscribeNamespace(handler);
+            subscribed = true;
+        } catch (const std::exception& e) {
+            LOGW("nativeSubscribeNamespace: SubscribeNamespace threw on attempt %d for %s: %s",
+                 attempt, prefix.c_str(), e.what());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        } catch (...) {
+            LOGW("nativeSubscribeNamespace: SubscribeNamespace threw (unknown) on attempt %d for %s",
+                 attempt, prefix.c_str());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    if (!subscribed) {
+        LOGE("nativeSubscribeNamespace: giving up subscribing to %s after retries", prefix.c_str());
+        return;
+    }
 
     // Wait for OK status
     int retries = 50; // 5 seconds

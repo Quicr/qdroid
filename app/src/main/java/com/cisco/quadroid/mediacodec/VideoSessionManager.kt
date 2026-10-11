@@ -15,14 +15,18 @@ import com.cisco.quadroid.mediacodec.encoder.VideoEncoderManager
 import com.cisco.quadroid.mediacodec.jitter.JitterBufferMonitor
 import com.cisco.quadroid.mediacodec.model.*
 import com.cisco.quadroid.mediacodec.participant.RemoteParticipantManager
+import com.cisco.quadroid.transport.AppHeaders
 import com.cisco.quadroid.transport.MoqConnectionStatus
 import com.cisco.quadroid.transport.MoqNative
 import com.cisco.quadroid.transport.MoqObjectCallback
 import com.cisco.quadroid.transport.MoqTransport
+import com.cisco.quadroid.transport.NamespaceFilter
 import com.cisco.quadroid.transport.NamespaceSubscriptionCallback
 import com.cisco.quadroid.transport.PublishOptions
 import com.cisco.quadroid.util.DeviceIdentifier
+import com.cisco.quadroid.util.PreferencesManager
 import com.cisco.quadroid.util.TrackUtil
+import com.cisco.quadroid.vad.SharedVoiceActivityState
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -103,6 +107,17 @@ class VideoSessionManager @Inject constructor(
 
     // Meeting Configuration
     private val meetingId = "meeting123"
+
+    // Top-N active-speaker configuration. Read from preferences at session start; the setters
+    // let the Settings UI change them live. demoTimeout mirrors the Mac's relay idle window.
+    private var topNEnabled = false
+    private var topNCount = PreferencesManager.TOPN_DEFAULT_COUNT
+    private val topNTimeoutMs = 2000L
+    // Namespace prefixes used for the video (filtered) and audio (unfiltered) subscriptions, so
+    // a live Top-N change can re-subscribe the video namespace with the new count.
+    private var videoNamespacePrefix: String? = null
+    private var audioNamespacePrefix: String? = null
+    private var namespaceCallback: NamespaceSubscriptionCallback? = null
 
     // Each device publishes under its own unique device ID
     private val deviceId = DeviceIdentifier.get(context)
@@ -321,22 +336,16 @@ class VideoSessionManager @Inject constructor(
         // Subscribe to meeting namespace to discover all participants
         // Extract common parent namespace to cover all quality levels
         // From cisco.webex.com/nab/v1/avc1/1080 -> cisco.webex.com/nab/v1
-        val subscriptionNamespace = if (catalogManager.catalogNamespacesUrl.isNotEmpty()) {
-            val firstNamespace = catalogManager.catalogNamespacesUrl[0]
-            // Remove the last two levels (codec type and quality) to get common parent
-            val parts = firstNamespace.split("/")
-            if (parts.size >= 2) {
-                parts.dropLast(2).joinToString("/")
-            } else {
-                firstNamespace
-            }
-        } else {
-            "webex.com/$meetingId" // Fallback if catalog not available
-        }
+        val subscriptionNamespace = computeCombinedNamespace()
 
-        Log.e("QUADROID_DEBUG", "⭐ Subscribing to namespace: $subscriptionNamespace")
-        Log.i(tag, "Subscribing to namespace: $subscriptionNamespace (covers all quality levels)")
-        moqTransport.subscribeNamespace(subscriptionNamespace, object : NamespaceSubscriptionCallback {
+        // Top-N: read current settings. The relay-side filter is applied to video only (audio
+        // is always delivered), and the grid is clamped to N when enabled.
+        topNEnabled = PreferencesManager.getTopNEnabled(context)
+        topNCount = PreferencesManager.getTopNCount(context)
+        SharedVoiceActivityState.setEnabled(topNEnabled)
+        participantManager.setMaxDisplayCount(if (topNEnabled) topNCount else null)
+
+        val nsCallback = object : NamespaceSubscriptionCallback {
             override fun onMatch(trackName: String): Boolean {
                 Log.e("QUADROID_DEBUG", "🔍 onMatch called for track: $trackName")
 
@@ -456,7 +465,9 @@ class VideoSessionManager @Inject constructor(
 
                 return true
             }
-        })
+        }
+        namespaceCallback = nsCallback
+        subscribeMeetingNamespaces(subscriptionNamespace, nsCallback)
 
 
         // Publish our tracks
@@ -542,6 +553,9 @@ class VideoSessionManager @Inject constructor(
      * @param owner Lifecycle owner for camera binding
      */
     fun enableVideo(enabled: Boolean, owner: LifecycleOwner) {
+        // Keep the Top-N ranking aware of camera mute: a muted-mic/camera-on publisher ranks as
+        // baseline presence, while both-muted ranks lowest.
+        SharedVoiceActivityState.setVideoEnabled(enabled)
         if (enabled) {
             videoEncoderManager.activeInputSurface?.let { surface ->
                 videoEncoderManager.activeConfig?.let { config ->
@@ -568,6 +582,9 @@ class VideoSessionManager @Inject constructor(
      * @param enabled True to enable microphone, false to mute
      */
     fun enableAudio(enabled: Boolean) {
+        // Keep the Top-N ranking aware of mic mute: when muted the live VAD value is ignored in
+        // favor of a mute-based presence rank (see SharedVoiceActivityState.activityValueForSend).
+        SharedVoiceActivityState.setMicEnabled(enabled)
         audioManager.enableMicrophone(enabled)
     }
 
@@ -581,6 +598,127 @@ class VideoSessionManager @Inject constructor(
      */
     fun setVadEnabled(enabled: Boolean) {
         audioManager.setVadEnabled(enabled)
+    }
+
+    /**
+     * Enables or disables Top-N active-speaker filtering at runtime (from the Settings toggle).
+     * Updates header stamping, the grid display cap, and re-subscribes the meeting namespaces so
+     * the relay-side filter is (re)applied.
+     */
+    fun setTopNEnabled(enabled: Boolean) {
+        topNEnabled = enabled
+        SharedVoiceActivityState.setEnabled(enabled)
+        participantManager.setMaxDisplayCount(if (enabled) topNCount else null)
+        Log.i(tag, "Top-N ${if (enabled) "enabled (N=$topNCount)" else "disabled"}")
+        resubscribeMeetingNamespaces()
+    }
+
+    /**
+     * Sets the number of active speakers (N) for Top-N at runtime (from the Settings stepper).
+     * Updates the grid cap and, because libquicr has no SetFilter, re-subscribes the video
+     * namespace with the new maxTracks.
+     */
+    fun setTopNCount(count: Int) {
+        topNCount = count.coerceIn(PreferencesManager.TOPN_MIN_COUNT, PreferencesManager.TOPN_MAX_COUNT)
+        Log.i(tag, "Top-N count set to $topNCount")
+        if (topNEnabled) {
+            participantManager.setMaxDisplayCount(topNCount)
+            resubscribeMeetingNamespaces()
+        }
+    }
+
+    /**
+     * Common parent namespace covering all quality levels, e.g.
+     * cisco.webex.com/nab/v1/avc1/1080 -> cisco.webex.com/nab/v1.
+     */
+    private fun computeCombinedNamespace(): String {
+        if (catalogManager.catalogNamespacesUrl.isEmpty()) {
+            return "webex.com/$meetingId" // Fallback if catalog not available
+        }
+        val firstNamespace = catalogManager.catalogNamespacesUrl[0]
+        // Remove the last two levels (codec type and quality) to get common parent
+        val parts = firstNamespace.split("/")
+        return if (parts.size >= 2) parts.dropLast(2).joinToString("/") else firstNamespace
+    }
+
+    /**
+     * Subscribes to the meeting namespace(s). When Top-N is enabled AND a clean video/audio
+     * split can be derived from the catalog, the relay-side [NamespaceFilter] is attached to the
+     * video namespace only (audio is always delivered). Otherwise a single combined, unfiltered
+     * subscription is used — identical to the pre-Top-N behavior.
+     */
+    private fun subscribeMeetingNamespaces(
+        combinedNamespace: String,
+        callback: NamespaceSubscriptionCallback
+    ) {
+        val (videoPrefix, audioPrefix) = computeMediaNamespacePrefixes()
+        if (topNEnabled && videoPrefix != null && audioPrefix != null && videoPrefix != audioPrefix) {
+            // Clean split: video gets the relay-side Top-N filter; audio is unfiltered.
+            videoNamespacePrefix = videoPrefix
+            audioNamespacePrefix = audioPrefix
+            val filter = NamespaceFilter(
+                propertyType = AppHeaders.AUDIO_ACTIVITY_INDICATOR,
+                maxTracks = topNCount,
+                timeoutMs = topNTimeoutMs
+            )
+            Log.i(tag, "Top-N ON: video=$videoPrefix (maxTracks=$topNCount), audio=$audioPrefix (unfiltered)")
+            moqTransport.subscribeNamespace(videoPrefix, callback, filter)
+            moqTransport.subscribeNamespace(audioPrefix, callback, null)
+        } else {
+            // Top-N off or no clean split: single combined subscription, no filter.
+            videoNamespacePrefix = combinedNamespace
+            audioNamespacePrefix = null
+            if (topNEnabled) {
+                Log.w(tag, "Top-N ON but no clean video/audio namespace split; using combined (unfiltered)")
+            }
+            Log.i(tag, "Subscribing to namespace: $combinedNamespace (covers all quality levels)")
+            moqTransport.subscribeNamespace(combinedNamespace, callback, null)
+        }
+    }
+
+    /**
+     * Tears down and re-establishes the meeting namespace subscriptions to (re)apply the
+     * relay-side filter after a Top-N setting change. No-op until connected.
+     */
+    private fun resubscribeMeetingNamespaces() {
+        val callback = namespaceCallback ?: return
+        if (moqTransport.connectionStatus.value != MoqConnectionStatus.CONNECTED) return
+        videoNamespacePrefix?.let { moqTransport.unsubscribeNamespace(it) }
+        audioNamespacePrefix?.let { if (it != videoNamespacePrefix) moqTransport.unsubscribeNamespace(it) }
+        subscribeMeetingNamespaces(computeCombinedNamespace(), callback)
+    }
+
+    /**
+     * Partitions the catalog namespaces into video and audio and returns the longest common
+     * path prefix of each (e.g. [.../avc1/1080, .../avc1/720] -> .../avc1). Returns null for a
+     * media type with no matching namespaces.
+     */
+    private fun computeMediaNamespacePrefixes(): Pair<String?, String?> {
+        val namespaces = catalogManager.catalogNamespacesUrl
+        if (namespaces.isEmpty()) return null to null
+        val videoPrefix = longestCommonPathPrefix(namespaces.filter { isVideoNamespace(it) })
+        val audioPrefix = longestCommonPathPrefix(namespaces.filter { isAudioNamespace(it) })
+        return videoPrefix to audioPrefix
+    }
+
+    private fun isVideoNamespace(ns: String): Boolean {
+        val l = ns.lowercase()
+        return l.contains("avc1") || l.contains("h264") || l.contains("hevc") ||
+            l.contains("h265") || l.contains("av01") || l.contains("vp8") ||
+            l.contains("vp9") || l.contains("/video")
+    }
+
+    private fun isAudioNamespace(ns: String): Boolean {
+        val l = ns.lowercase()
+        return l.contains("opus") || l.contains("mp4a") || l.contains("aac") || l.contains("/audio")
+    }
+
+    /** Longest common '/'-delimited path prefix across the given namespaces (null if empty). */
+    private fun longestCommonPathPrefix(namespaces: List<String>): String? {
+        if (namespaces.isEmpty()) return null
+        return namespaces.map { it.split("/") }.reduce { acc, parts ->
+            acc.zip(parts).takeWhile { it.first == it.second }.map { it.first }
+        }.joinToString("/").ifEmpty { null }
     }
 
     /**
@@ -607,8 +745,12 @@ class VideoSessionManager @Inject constructor(
 
         // Note: Remote tracks are unsubscribed via namespace unsubscribe below
 
-        // Unsubscribe from namespace
-        if (catalogManager.catalogNamespacesUrl.isNotEmpty()) {
+        // Unsubscribe from the namespace(s) we actually subscribed to (combined, or the
+        // video/audio split when Top-N was active). Fall back to the catalog namespace.
+        val subscribed = listOfNotNull(videoNamespacePrefix, audioNamespacePrefix).distinct()
+        if (subscribed.isNotEmpty()) {
+            subscribed.forEach { moqTransport.unsubscribeNamespace(it) }
+        } else if (catalogManager.catalogNamespacesUrl.isNotEmpty()) {
             moqTransport.unsubscribeNamespace(catalogManager.catalogNamespacesUrl[0])
         }
 
@@ -616,6 +758,12 @@ class VideoSessionManager @Inject constructor(
     }
 
     private fun cleanup() {
+        // Reset Top-N publish state so a new session starts clean.
+        SharedVoiceActivityState.reset()
+        videoNamespacePrefix = null
+        audioNamespacePrefix = null
+        namespaceCallback = null
+
         // Stop jitter buffer monitoring first
         stopJitterBufferMonitoring()
 

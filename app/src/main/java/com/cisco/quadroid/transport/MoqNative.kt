@@ -131,7 +131,8 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
         payload: ByteBuffer,
         priority: Int,
         deliveryTimeoutMs: Long,
-        useDatagram: Boolean
+        useDatagram: Boolean,
+        activityValue: Int
     ) {
         if (nativePtr == 0L) return
         if (!payload.isDirect) {
@@ -147,7 +148,8 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
             payload.remaining(),
             priority,
             deliveryTimeoutMs,
-            useDatagram
+            useDatagram,
+            activityValue
         )
     }
 
@@ -156,8 +158,17 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
         if (nativePtr != 0L) nativeSubscribe(nativePtr, trackName, callback)
     }
 
-    override fun subscribeNamespace(namespacePrefix: String, callback: NamespaceSubscriptionCallback) {
-        if (nativePtr != 0L) nativeSubscribeNamespace(nativePtr, namespacePrefix, callback)
+    override fun subscribeNamespace(
+        namespacePrefix: String,
+        callback: NamespaceSubscriptionCallback,
+        filter: NamespaceFilter?
+    ) {
+        if (nativePtr == 0L) return
+        // propertyType < 0 signals "no filter" to the native layer (std::monostate).
+        val propertyType = filter?.propertyType ?: -1L
+        val maxTracks = filter?.maxTracks?.toLong() ?: 0L
+        val timeoutMs = filter?.timeoutMs ?: 0L
+        nativeSubscribeNamespace(nativePtr, namespacePrefix, callback, propertyType, maxTracks, timeoutMs)
     }
 
     override fun setNamespaceDefaultBehavior(acceptAll: Boolean) {
@@ -200,10 +211,18 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
         payloadSize: Int,
         priority: Int,
         deliveryTimeoutMs: Long,
-        useDatagram: Boolean
+        useDatagram: Boolean,
+        activityValue: Int
     )
     private external fun nativeSubscribe(ptr: Long, trackName: String, callback: MoqObjectCallback)
-    private external fun nativeSubscribeNamespace(ptr: Long, namespacePrefix: String, callback: NamespaceSubscriptionCallback)
+    private external fun nativeSubscribeNamespace(
+        ptr: Long,
+        namespacePrefix: String,
+        callback: NamespaceSubscriptionCallback,
+        propertyType: Long,
+        maxTracks: Long,
+        timeoutMs: Long
+    )
     private external fun nativeUnpublishNamespace(ptr: Long, namespacePrefix: String)
     private external fun nativeUnsubscribeNamespace(ptr: Long, namespacePrefix: String)
     private external fun nativeSetNamespaceDefaultBehavior(ptr: Long, acceptAll: Boolean)

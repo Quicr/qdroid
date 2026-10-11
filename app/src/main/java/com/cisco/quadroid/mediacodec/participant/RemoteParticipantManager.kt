@@ -27,6 +27,65 @@ class RemoteParticipantManager(
     private val _remoteParticipants = MutableStateFlow<List<ParticipantStream>>(emptyList())
     val remoteParticipants: StateFlow<List<ParticipantStream>> = _remoteParticipants.asStateFlow()
 
+    // Top-N display cap. When non-null, at most this many participant tiles are shown, keeping
+    // the most-recently-active ones (the relay already forwards only the top-N, so this is a
+    // client-side safeguard against transient over-delivery during speaker swaps). Accessed on
+    // the main looper where the participant list is published.
+    @Volatile
+    private var maxDisplayCount: Int? = null
+
+    // Track keys ordered by recency of activity (most recent at the end), used to decide which
+    // tiles to keep when the list exceeds maxDisplayCount.
+    private val recencyOrder = mutableListOf<String>()
+
+    /**
+     * Sets the maximum number of participant tiles to display (Top-N), or null for no cap.
+     * Re-clamps the currently displayed list on the main looper.
+     */
+    fun setMaxDisplayCount(count: Int?) {
+        maxDisplayCount = count
+        Handler(context.mainLooper).post {
+            val current = _remoteParticipants.value
+            val mostRecent = recencyOrder.lastOrNull() ?: current.lastOrNull()?.id
+            _remoteParticipants.value = applyDisplayCap(current, mostRecent)
+        }
+    }
+
+    /**
+     * Applies the Top-N display cap: marks [mostRecentKey] as the most recently active, prunes
+     * stale recency entries, and — if over the cap — keeps the most-recently-active tiles while
+     * preserving the existing display order for stability.
+     */
+    private fun applyDisplayCap(
+        participants: List<ParticipantStream>,
+        mostRecentKey: String?
+    ): List<ParticipantStream> {
+        if (mostRecentKey != null) {
+            recencyOrder.remove(mostRecentKey)
+            recencyOrder.add(mostRecentKey)
+        }
+        val present = participants.map { it.id }.toSet()
+        recencyOrder.retainAll(present)
+        return clampForDisplay(participants, recencyOrder, maxDisplayCount)
+    }
+
+    companion object {
+        /**
+         * Pure Top-N clamp: if [participants] exceeds [cap], keeps the [cap] most-recently-active
+         * tiles (per [recencyMostRecentLast], most-recent at the end) while preserving the input
+         * order for stability. Returns [participants] unchanged when [cap] is null or not exceeded.
+         */
+        fun clampForDisplay(
+            participants: List<ParticipantStream>,
+            recencyMostRecentLast: List<String>,
+            cap: Int?
+        ): List<ParticipantStream> {
+            if (cap == null || participants.size <= cap) return participants
+            val keep = recencyMostRecentLast.takeLast(cap).toSet()
+            return participants.filter { it.id in keep }
+        }
+    }
+
     /**
      * Extract participant ID from track name namespace.
      * Uses the last tuple of the namespace before the track name.
@@ -291,7 +350,7 @@ class RemoteParticipantManager(
                 // Add new participant stream with the active track
                 val stream = ParticipantStream(activeTrackKey, aspectRatio)
                 val newParticipants = filteredParticipants + stream
-                _remoteParticipants.value = newParticipants
+                _remoteParticipants.value = applyDisplayCap(newParticipants, activeTrackKey)
                 Log.e("QUADROID_DEBUG", "🎉 REMOTE PARTICIPANT ADDED TO UI!")
                 Log.e("QUADROID_DEBUG", "   participantId: $participantId")
                 Log.e("QUADROID_DEBUG", "   trackKey: $activeTrackKey")
@@ -300,7 +359,7 @@ class RemoteParticipantManager(
                 Log.i(tag, "✅ Total remote participants: ${_remoteParticipants.value.size}, ids=[${_remoteParticipants.value.map { it.id }.joinToString()}]")
             } else {
                 // Track is already showing, just update the filtered list
-                _remoteParticipants.value = filteredParticipants
+                _remoteParticipants.value = applyDisplayCap(filteredParticipants, activeTrackKey)
                 Log.d(tag, "Track $activeTrackKey already showing for $participantId")
             }
         }
@@ -309,6 +368,7 @@ class RemoteParticipantManager(
     fun clear() {
         _remoteParticipants.value = emptyList()
         remoteParticipantStates.clear()
+        recencyOrder.clear()
         Log.d(tag, "Cleared all remote participants")
     }
 }

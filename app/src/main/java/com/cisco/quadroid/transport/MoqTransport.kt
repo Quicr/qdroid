@@ -12,6 +12,32 @@ enum class MoqConnectionStatus {
 }
 
 /**
+ * MoQ per-object extension header ids used by the app.
+ *
+ * [AUDIO_ACTIVITY_INDICATOR] carries the 3-value voice-activity state
+ * (speechEnd=0 / continuousSpeech=1 / speechStart=2) that the relay ranks on for
+ * Top-N active-speaker filtering. Must match the id the relay expects (12).
+ */
+object AppHeaders {
+    const val AUDIO_ACTIVITY_INDICATOR: Long = 12
+}
+
+/**
+ * Relay-side filter attached to a namespace subscription so the relay forwards only the
+ * top [maxTracks] tracks ranked by [propertyType] (e.g. [AppHeaders.AUDIO_ACTIVITY_INDICATOR]).
+ * Mirrors libquicr's `quicr::messages::TrackFilter`.
+ *
+ * @param propertyType Per-object header id the relay ranks on.
+ * @param maxTracks Maximum number of concurrent tracks the relay forwards for this namespace.
+ * @param timeoutMs Idle window (ms) before the relay may swap a track out of the top-N.
+ */
+data class NamespaceFilter(
+    val propertyType: Long,
+    val maxTracks: Int,
+    val timeoutMs: Long
+)
+
+/**
  * High-level interface for Media over QUIC (MoQ) transport.
  */
 interface MoqTransport {
@@ -68,7 +94,8 @@ interface MoqTransport {
         payload: ByteBuffer,
         priority: Int = 0,
         deliveryTimeoutMs: Long = 0,
-        useDatagram: Boolean = false
+        useDatagram: Boolean = false,
+        activityValue: Int = -1
     )
 
     /**
@@ -82,8 +109,14 @@ interface MoqTransport {
      * Subscribes to a namespace prefix.
      * @param namespacePrefix The prefix to watch for matching publishes.
      * @param callback Callback to handle new matching tracks.
+     * @param filter Optional relay-side top-N [NamespaceFilter]. When null, all matching
+     *   tracks are forwarded (default, unchanged behavior).
      */
-    fun subscribeNamespace(namespacePrefix: String, callback: NamespaceSubscriptionCallback)
+    fun subscribeNamespace(
+        namespacePrefix: String,
+        callback: NamespaceSubscriptionCallback,
+        filter: NamespaceFilter? = null
+    )
 
     /**
      * Configures default behavior for namespace matches.

@@ -28,3 +28,8 @@ add_executable(vad_gate_test vad_gate_test.cpp)
 target_include_directories(vad_gate_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../main/cpp)
 
 add_test(NAME vad_gate_test COMMAND vad_gate_test)
+
+add_executable(audio_activity_state_machine_test audio_activity_state_machine_test.cpp)
+target_include_directories(audio_activity_state_machine_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../main/cpp)
+
+add_test(NAME audio_activity_state_machine_test COMMAND audio_activity_state_machine_test)

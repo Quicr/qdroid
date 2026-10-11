@@ -64,6 +64,21 @@ class MainViewModelTest {
     }
 
     @Test
+    fun `setTopNEnabled forwards to videoSessionManager`() {
+        viewModel.setTopNEnabled(true)
+        verify(exactly = 1) { videoSessionManager.setTopNEnabled(true) }
+
+        viewModel.setTopNEnabled(false)
+        verify(exactly = 1) { videoSessionManager.setTopNEnabled(false) }
+    }
+
+    @Test
+    fun `setTopNCount forwards to videoSessionManager`() {
+        viewModel.setTopNCount(3)
+        verify(exactly = 1) { videoSessionManager.setTopNCount(3) }
+    }
+
+    @Test
     fun `endCall transitions back to Lobby and stops session`() = runTest {
         viewModel.uiState.test {
             assertEquals(CallUiState.Lobby, awaitItem())

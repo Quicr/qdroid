@@ -21,7 +21,7 @@ android {
         minSdk = 30
         targetSdk = 35
         versionCode = 1
-        versionName = "1.2"
+        versionName = "1.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -151,12 +151,12 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
 
-// Disable tests to avoid cross-compilation execution errors
-tasks.withType<Test> {
-    enabled = false
-}
-
+// JVM unit tests (testDebugUnitTest) run on the host and are kept enabled so the Top-N /
+// VAD / ViewModel unit tests provide CI value. The release-variant unit test task and the
+// on-device instrumented tests are disabled to avoid cross-compilation execution errors in
+// environments without an NDK toolchain / connected device.
 afterEvaluate {
+    tasks.findByName("testReleaseUnitTest")?.enabled = false
     tasks.findByName("connectedAndroidTest")?.enabled = false
     tasks.findByName("connectedDebugAndroidTest")?.enabled = false
 }

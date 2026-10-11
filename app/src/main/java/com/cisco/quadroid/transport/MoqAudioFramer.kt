@@ -5,6 +5,7 @@ package com.cisco.quadroid.transport
 
 import android.media.MediaCodec
 import android.util.Log
+import com.cisco.quadroid.vad.SharedVoiceActivityState
 import java.nio.ByteBuffer
 
 /**
@@ -28,7 +29,8 @@ class MoqAudioFramer(
             Log.d(tag, "Processing Opus frame $frameCount, size=${info.size}, groupId=$currentGroupId")
         }
 
-        // Each audio packet is its own group with objectId=0
+        // Each audio packet is its own group with objectId=0. Stamp the current voice-activity
+        // value so the relay can rank this publisher for Top-N (-1 => no header when disabled).
         transport.sendObject(
             trackName = trackName,
             groupId = currentGroupId,
@@ -36,7 +38,8 @@ class MoqAudioFramer(
             payload = buffer,
             priority = 1, // Audio often higher priority than video
             deliveryTimeoutMs = 1000,
-            useDatagram = true // Audio can use datagrams for lower latency
+            useDatagram = true, // Audio can use datagrams for lower latency
+            activityValue = SharedVoiceActivityState.activityValueForSend()
         )
 
         // Increment group ID for next packet

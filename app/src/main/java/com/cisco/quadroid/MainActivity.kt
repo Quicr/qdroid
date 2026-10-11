@@ -63,6 +63,7 @@ import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Videocam
@@ -1238,6 +1239,10 @@ fun SettingsScreen(
     // Developer mode state
     var developerMode by remember { mutableStateOf(com.cisco.quadroid.util.PreferencesManager.getDeveloperMode(context)) }
 
+    // Top-N active-speaker state
+    var topNEnabled by remember { mutableStateOf(com.cisco.quadroid.util.PreferencesManager.getTopNEnabled(context)) }
+    var topNCount by remember { mutableStateOf(com.cisco.quadroid.util.PreferencesManager.getTopNCount(context)) }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -1350,6 +1355,77 @@ fun SettingsScreen(
                                     com.cisco.quadroid.util.PreferencesManager.setCloudflareOverride(context, enabled)
                                 }
                             )
+                        }
+                    }
+                }
+            }
+
+            SettingsCardSection(header = "Top-N") {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Active Speaker Top-N")
+                        Switch(
+                            checked = topNEnabled,
+                            onCheckedChange = { enabled ->
+                                topNEnabled = enabled
+                                com.cisco.quadroid.util.PreferencesManager.setTopNEnabled(context, enabled)
+                                viewModel.setTopNEnabled(enabled)
+                            }
+                        )
+                    }
+
+                    // Active-speaker count stepper (only shown when enabled)
+                    if (topNEnabled) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp)
+                                .padding(bottom = 16.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Active Speakers")
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                IconButton(
+                                    onClick = {
+                                        val newCount = (topNCount - 1)
+                                            .coerceAtLeast(com.cisco.quadroid.util.PreferencesManager.TOPN_MIN_COUNT)
+                                        topNCount = newCount
+                                        com.cisco.quadroid.util.PreferencesManager.setTopNCount(context, newCount)
+                                        viewModel.setTopNCount(newCount)
+                                    },
+                                    enabled = topNCount > com.cisco.quadroid.util.PreferencesManager.TOPN_MIN_COUNT
+                                ) {
+                                    Icon(Icons.Filled.Remove, contentDescription = "Decrease active speakers")
+                                }
+                                Text(
+                                    text = "$topNCount",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    modifier = Modifier.width(24.dp),
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                                )
+                                IconButton(
+                                    onClick = {
+                                        val newCount = (topNCount + 1)
+                                            .coerceAtMost(com.cisco.quadroid.util.PreferencesManager.TOPN_MAX_COUNT)
+                                        topNCount = newCount
+                                        com.cisco.quadroid.util.PreferencesManager.setTopNCount(context, newCount)
+                                        viewModel.setTopNCount(newCount)
+                                    },
+                                    enabled = topNCount < com.cisco.quadroid.util.PreferencesManager.TOPN_MAX_COUNT
+                                ) {
+                                    Icon(Icons.Filled.Add, contentDescription = "Increase active speakers")
+                                }
+                            }
                         }
                     }
                 }

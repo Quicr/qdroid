@@ -14,6 +14,7 @@
 #include <opus.h>
 #include "lockfree_queue.h"
 #include "vad_gate.h"
+#include "audio_activity_state_machine.h"
 // libfvad's fvad.h has no extern "C" guard of its own, so wrap it to keep the
 // C symbols unmangled when consumed from this C++ translation unit.
 extern "C" {
@@ -74,26 +75,44 @@ public:
     // Returns true if this frame should be transmitted (speech active, including
     // the trailing hangover). Fails open (true) if the detector is unavailable or
     // the frame is rejected, so audio is never silently lost on error.
+    //
+    // Also advances the 3-value active-speaker state machine (for Top-N ranking) on
+    // every frame — voiced AND silent — so its silence-drop timers run even though
+    // silent frames are not transmitted. Read the current level with activityRaw().
     bool shouldTransmit(const int16_t* frame, size_t length) {
         if (!vad_) return true;
 
         int raw = fvad_process(vad_, frame, length);
         if (raw < 0) return true; // invalid frame length — shouldn't happen at 960
 
+        const bool voiced = (raw == 1);
+
+        // Advance the Top-N activity state machine on every frame. Time is derived from
+        // the fixed frame cadence (monotonic, deterministic — no wall clock needed).
+        nowMs_ += VAD_FRAME_MS;
+        activity_.update(voiced, nowMs_);
+
         // The speech/silence hysteresis lives in VadGate (see vad_gate.h) so it can
         // be unit-tested on the host independently of libfvad.
-        return gate_.update(raw == 1);
+        return gate_.update(voiced);
     }
+
+    // Current 3-value active-speaker level: 0=speechEnd, 1=continuousSpeech, 2=speechStart.
+    int activityRaw() const { return activity_.rawValue(); }
 
     // Clear hysteresis/history so a freshly re-enabled gate starts clean.
     void reset() {
         if (vad_) fvad_reset(vad_);
         gate_.reset();
+        activity_.reset();
+        nowMs_ = 0;
     }
 
 private:
     Fvad* vad_ = nullptr;
     VadGate gate_{VAD_FRAME_MS, VAD_SPEECH_TRIGGER_MS, VAD_SILENCE_HANGOVER_MS};
+    AudioActivityStateMachine activity_{};
+    int64_t nowMs_ = 0;
 };
 
 class AudioCapture : public AudioStreamCallback {
@@ -103,6 +122,7 @@ public:
         this->callback = env->NewGlobalRef(callback);
         jclass clazz = env->GetObjectClass(callback);
         onAudioEncodedId = env->GetMethodID(clazz, "onAudioEncoded", "(Ljava/nio/ByteBuffer;IJI)V");
+        onVoiceActivityId = env->GetMethodID(clazz, "onVoiceActivity", "(I)V");
         vadEnabled.store(initialVadEnabled);
     }
 
@@ -212,6 +232,8 @@ private:
     JavaVM* jvm;
     jobject callback = nullptr;
     jmethodID onAudioEncodedId;
+    jmethodID onVoiceActivityId = nullptr;
+    int lastReportedActivity = -1;
     std::shared_ptr<AudioStream> stream;
     OpusEncoder* encoder = nullptr;
     std::atomic<bool> isRunning{false};
@@ -250,14 +272,22 @@ private:
                 }
                 prevVadEnabled = curVadEnabled;
 
-                if (curVadEnabled && !vad.shouldTransmit(pcmData.data(), FRAME_SIZE)) {
-                    framesDropped++;
-                    if (framesProcessed % 100 == 0) {
-                        double dropRate = (framesDropped * 100.0) / framesProcessed;
-                        LOGD("VAD stats: dropped=%lld/%lld (%.1f%%)",
-                             (long long)framesDropped, (long long)framesProcessed, dropRate);
+                if (curVadEnabled) {
+                    const bool transmit = vad.shouldTransmit(pcmData.data(), FRAME_SIZE);
+                    // Surface 3-value active-speaker changes for Top-N ranking. This must run
+                    // for silent frames too (so the drop to speechEnd is observable), hence it
+                    // is reported before the silence-drop below.
+                    reportActivityIfChanged(vad.activityRaw());
+
+                    if (!transmit) {
+                        framesDropped++;
+                        if (framesProcessed % 100 == 0) {
+                            double dropRate = (framesDropped * 100.0) / framesProcessed;
+                            LOGD("VAD stats: dropped=%lld/%lld (%.1f%%)",
+                                 (long long)framesDropped, (long long)framesProcessed, dropRate);
+                        }
+                        continue; // silence — skip encode + callback
                     }
-                    continue; // silence — skip encode + callback
                 }
 
                 // Encode with Opus
@@ -288,6 +318,18 @@ private:
                 // Queue empty, sleep briefly
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
+        }
+    }
+
+    // Notify Kotlin of a 3-value active-speaker change (Top-N ranking). Called from the
+    // encode thread; de-duplicates so only genuine transitions cross JNI.
+    void reportActivityIfChanged(int value) {
+        if (value == lastReportedActivity) return;
+        lastReportedActivity = value;
+        if (!onVoiceActivityId) return;
+        JNIEnv* env = getEnv();
+        if (env && callback) {
+            env->CallVoidMethod(callback, onVoiceActivityId, (jint)value);
         }
     }
 

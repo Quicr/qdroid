@@ -29,6 +29,19 @@ class NativeAudioLib {
 
     interface NativeAudioCallback {
         fun onAudioEncoded(payload: ByteBuffer, size: Int, presentationTimeUs: Long, flags: Int)
+
+        /**
+         * Called whenever the native 3-value voice-activity state changes (for Top-N ranking).
+         *
+         * Fires for both voiced and silent frames (unlike [onAudioEncoded], which only fires for
+         * transmitted/voiced frames), so the drop to `speechEnd` during silence is observable.
+         *
+         * @param value The [com.cisco.nativeaudio] raw activity level:
+         *   `0` = speechEnd, `1` = continuousSpeech, `2` = speechStart.
+         *
+         * Default no-op so existing callbacks that don't care about Top-N keep working unchanged.
+         */
+        fun onVoiceActivity(value: Int) {}
     }
 
     companion object {

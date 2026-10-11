@@ -10,6 +10,7 @@ import com.cisco.nativeaudio.NativeAudioLib
 import com.cisco.quadroid.transport.MoqAudioFramer
 import com.cisco.quadroid.transport.MoqTransport
 import com.cisco.quadroid.util.PreferencesManager
+import com.cisco.quadroid.vad.SharedVoiceActivityState
 import java.nio.ByteBuffer
 
 class AudioManager(
@@ -49,6 +50,12 @@ class AudioManager(
                     info.set(0, size, presentationTimeUs, flags)
                     audioFramer?.processFrame(payload, info)
                 }
+            }
+
+            override fun onVoiceActivity(value: Int) {
+                // Native 3-value state machine transitioned; publish for Top-N ranking.
+                // The video publisher mirrors this onto every frame (see MoqMediaFramer).
+                SharedVoiceActivityState.post(value)
             }
         }, vadEnabled)
 
