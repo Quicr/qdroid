@@ -53,6 +53,17 @@ VideoTrackJitterBuffer::VideoTrackJitterBuffer(
     config.enableCatchUp = true;  // Enable catch-up mode (decode-only intermediate frames)
     config.catchUpThreshold = 5;  // Trigger catch-up when 5+ frames queued
 
+    // Top-N swaps a publisher's video out of the relay's forwarding set while they are silent, then
+    // back in when they speak. On swap-in the relay resumes mid-group, so the keyframe + early
+    // objects of the current group are missing and the arbiter can never complete that group. By
+    // default (skipToLatestGroup=false) it waits on that dead group's deadline and stays wedged ->
+    // the remote tile freezes on the last pre-silence frame indefinitely. Skip aggressively to the
+    // next group that actually has a keyframe so a swapped-in stream recovers. skipOnlyToKeyframe
+    // (default true) keeps this safe: it only ever jumps to a group whose keyframe was received, so
+    // no P-frame is fed to the decoder without its keyframe.
+    config.skipToLatestGroup = true;
+    config.skipOnlyToKeyframe = true;
+
     // Create Kairos GroupArbiter
     arbiter_ = std::make_unique<GroupArbiter<std::vector<uint8_t>>>(config);
 

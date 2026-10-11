@@ -3,6 +3,7 @@
 
 package com.cisco.quadroid.vad
 
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -62,6 +63,11 @@ object SharedVoiceActivityState {
     @Volatile
     private var videoEnabled = true
 
+    // One-shot request for the video publisher to emit an IDR. Set on a mute->unmute transition so
+    // that when the relay swaps us back into the top-N (we now rank as speaking) the subscriber
+    // receives a decodable keyframe instead of a mid-group P-frame. Consumed by the video framer.
+    private val pendingVideoKeyframe = AtomicBoolean(false)
+
     /** Enables/disables header stamping. Driven by the Top-N settings toggle. */
     fun setEnabled(isEnabled: Boolean) {
         enabled = isEnabled
@@ -71,8 +77,17 @@ object SharedVoiceActivityState {
 
     /** Mirrors the microphone mute state (true == unmuted). Driven by the mic toggle. */
     fun setMicEnabled(isEnabled: Boolean) {
+        val wasEnabled = micEnabled
         micEnabled = isEnabled
+        // Mute -> unmute while Top-N is active: force a keyframe so speaking-after-unmute swaps us
+        // back in with a clean IDR. Guarded on `enabled` so Top-N-off behavior is unchanged.
+        if (enabled && !wasEnabled && isEnabled) {
+            pendingVideoKeyframe.set(true)
+        }
     }
+
+    /** Returns and clears the one-shot keyframe request (video framer calls this per frame). */
+    fun consumePendingVideoKeyframe(): Boolean = pendingVideoKeyframe.getAndSet(false)
 
     /** Mirrors the camera mute state (true == on). Driven by the video toggle. */
     fun setVideoEnabled(isEnabled: Boolean) {
@@ -112,5 +127,6 @@ object SharedVoiceActivityState {
         value.set(AudioActivityValue.SPEECH_END.raw)
         micEnabled = true
         videoEnabled = true
+        pendingVideoKeyframe.set(false)
     }
 }

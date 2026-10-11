@@ -5,6 +5,8 @@ package com.cisco.quadroid.vad
 
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -77,6 +79,40 @@ class SharedVoiceActivityStateTest {
         SharedVoiceActivityState.setMicEnabled(false)
         SharedVoiceActivityState.setVideoEnabled(true)
         assertEquals(-1, SharedVoiceActivityState.activityValueForSend())
+    }
+
+    @Test
+    fun `unmute while top-n enabled requests a one-shot keyframe`() {
+        SharedVoiceActivityState.setEnabled(true)
+        SharedVoiceActivityState.setMicEnabled(false) // mute
+        SharedVoiceActivityState.setMicEnabled(true)  // unmute -> should arm keyframe
+        assertTrue(SharedVoiceActivityState.consumePendingVideoKeyframe())
+        // One-shot: a second consume returns false.
+        assertFalse(SharedVoiceActivityState.consumePendingVideoKeyframe())
+    }
+
+    @Test
+    fun `unmute while top-n disabled does not request a keyframe`() {
+        SharedVoiceActivityState.setEnabled(false)
+        SharedVoiceActivityState.setMicEnabled(false)
+        SharedVoiceActivityState.setMicEnabled(true)
+        assertFalse(SharedVoiceActivityState.consumePendingVideoKeyframe())
+    }
+
+    @Test
+    fun `redundant unmute does not re-arm keyframe`() {
+        SharedVoiceActivityState.setEnabled(true)
+        SharedVoiceActivityState.setMicEnabled(true) // already enabled -> no transition
+        assertFalse(SharedVoiceActivityState.consumePendingVideoKeyframe())
+    }
+
+    @Test
+    fun `reset clears a pending keyframe`() {
+        SharedVoiceActivityState.setEnabled(true)
+        SharedVoiceActivityState.setMicEnabled(false)
+        SharedVoiceActivityState.setMicEnabled(true)
+        SharedVoiceActivityState.reset()
+        assertFalse(SharedVoiceActivityState.consumePendingVideoKeyframe())
     }
 
     @Test

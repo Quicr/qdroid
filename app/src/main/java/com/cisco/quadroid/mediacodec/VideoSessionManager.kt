@@ -90,8 +90,12 @@ class VideoSessionManager @Inject constructor(
     // (same thread as connect) — running it elsewhere breaks stream-based video publishing.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    // Multi-quality video encoder configuration
+    // Multi-quality video encoder configuration. Mutated by parseVideoEncoderConfigs() on the
+    // catalog-callback thread and read by startSession() on Dispatchers.Default; all access goes
+    // through [encoderConfigsLock] and callers pass an immutable snapshot to setupEncoders() so the
+    // encoder never iterates this live list (which would throw ConcurrentModificationException).
     private val videoEncoderConfigs = mutableListOf<VideoEncoderConfig>()
+    private val encoderConfigsLock = Any()
 
     private var lifecycleOwner: LifecycleOwner? = null
     private var rotation: Int = 0
@@ -224,17 +228,22 @@ class VideoSessionManager @Inject constructor(
     }
 
     private fun parseVideoEncoderConfigs() {
-        videoEncoderConfigs.clear()
-        videoEncoderConfigs.addAll(
-            VideoEncoderConfigParser.parse(
-                catalogManager.catalogTracks,
-                catalogManager.catalogTrackNamesUrl
-            )
+        val parsed = VideoEncoderConfigParser.parse(
+            catalogManager.catalogTracks,
+            catalogManager.catalogTrackNamesUrl
         )
 
-        // Setup encoders with new configs
-        if (videoEncoderConfigs.isNotEmpty()) {
-            videoEncoderManager.setupEncoders(videoEncoderConfigs)
+        // Swap the backing list and take an immutable snapshot atomically so a concurrent
+        // startSession() reader never observes a half-rebuilt list.
+        val snapshot = synchronized(encoderConfigsLock) {
+            videoEncoderConfigs.clear()
+            videoEncoderConfigs.addAll(parsed)
+            videoEncoderConfigs.toList()
+        }
+
+        // Setup encoders with the snapshot (not the shared mutable list).
+        if (snapshot.isNotEmpty()) {
+            videoEncoderManager.setupEncoders(snapshot)
         }
     }
 
@@ -311,10 +320,13 @@ class VideoSessionManager @Inject constructor(
             Log.i(tag, "Starting session with deviceId: $deviceId")
             Log.i(tag, "Local tracks from catalog: ${catalogManager.catalogTrackNamesUrl.joinToString(", ")}")
 
-            // Recreate encoders if they were destroyed during cleanup
-            if (videoEncoderConfigs.isNotEmpty() && videoEncoderManager.activeInputSurface == null) {
+            // Recreate encoders if they were destroyed during cleanup. Snapshot the shared list
+            // under the lock and hand the copy to setupEncoders so it never iterates the live list
+            // while parseVideoEncoderConfigs() rebuilds it on the catalog thread.
+            val snapshot = synchronized(encoderConfigsLock) { videoEncoderConfigs.toList() }
+            if (snapshot.isNotEmpty() && videoEncoderManager.activeInputSurface == null) {
                 Log.i(tag, "Recreating encoders after cleanup")
-                videoEncoderManager.setupEncoders(videoEncoderConfigs)
+                videoEncoderManager.setupEncoders(snapshot)
             }
         }
 

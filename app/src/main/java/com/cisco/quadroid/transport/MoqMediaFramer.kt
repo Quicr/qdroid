@@ -4,6 +4,7 @@
 package com.cisco.quadroid.transport
 
 import android.media.MediaCodec
+import android.util.Log
 import com.cisco.quadroid.vad.SharedVoiceActivityState
 import com.cisco.quadroid.vad.VideoVADTransition
 import java.nio.ByteBuffer
@@ -25,10 +26,13 @@ class MoqMediaFramer(
     private val trackName: String,
     private val onRequestKeyframe: (() -> Unit)? = null
 ) {
+    private val tag = "MoqMediaFramer"
     private var currentGroupId: Long = System.currentTimeMillis() and 0xFFFFFFFFL
     private var currentObjectId: Long = 0
     private var firstFrame = true
     private val vadTransition = VideoVADTransition()
+    // Last activity value we logged, to log only on change (not per frame).
+    private var lastLoggedActivity = Int.MIN_VALUE
 
     fun processFrame(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
         // Skip codec config frames (SPS/PPS), they are usually handled out-of-band or prefixed
@@ -52,12 +56,22 @@ class MoqMediaFramer(
         // Mirror the publisher's current voice-activity value onto this object so the relay
         // can rank it for Top-N. Returns -1 (no header) when Top-N is disabled.
         val activityValue = SharedVoiceActivityState.activityValueForSend()
+        // Log the stamped 3-value indicator only when it changes (-1 => Top-N off / no header).
+        if (activityValue != lastLoggedActivity) {
+            lastLoggedActivity = activityValue
+            Log.d(tag, "Stamping activityIndicator=$activityValue on VIDEO $trackName")
+        }
+        // A mute->unmute forces a one-shot IDR so speaking-after-unmute swaps us back into the
+        // relay's top-N with a decodable keyframe rather than a mid-group P-frame. Consume
+        // unconditionally so the flag never goes stale (it is only ever set while Top-N is on).
+        val forceKeyframe = SharedVoiceActivityState.consumePendingVideoKeyframe()
         if (activityValue >= 0) {
             // Track the value actually stamped on the wire (which already accounts for mute state)
-            // so the transition stays consistent with how the relay ranks us.
+            // so the transition stays consistent with how the relay ranks us. A rising transition
+            // (first voiced frame / speech onset) is keyframe-worthy; so is a mute->unmute.
             val action = vadTransition.update(activityValue)
-            // A rise (e.g. speechEnd -> speechStart) is the only keyframe-worthy transition.
-            if (action.requestKeyframe) {
+            if (action.requestKeyframe || forceKeyframe) {
+                Log.d(tag, "Requesting IDR (rise=${action.requestKeyframe}, unmute=$forceKeyframe) on $trackName")
                 onRequestKeyframe?.invoke()
             }
         }

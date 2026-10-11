@@ -47,6 +47,7 @@ class VideoEncoderManager(
     val activeInputSurface: Surface?
         get() = encoders.getOrNull(activeEncoderIndex)?.inputSurface
 
+    @Synchronized
     fun setupEncoders(configs: List<VideoEncoderConfig>) {
         // Catalog updates fire repeatedly (every refresh/delta), each invoking this
         // method. Rebuilding encoders every time leaks MediaCodec instances and exhausts
@@ -268,6 +269,7 @@ class VideoEncoderManager(
         }
     }
 
+    @Synchronized
     fun cleanup() {
         encoderHandler.removeCallbacksAndMessages(null)
 
@@ -292,6 +294,7 @@ class VideoEncoderManager(
         Log.i(tag, "Encoder cleanup complete")
     }
 
+    @Synchronized
     fun shutdown() {
         cleanup()
         encoderThread.quitSafely()
