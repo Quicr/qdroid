@@ -15,6 +15,7 @@
 // (See nativeaudio/src/test/cpp/CMakeLists.txt for a CMake/CTest target.)
 
 #include "audio_activity_state_machine.h"
+#include "vad_gate.h"
 
 #include <cstdio>
 
@@ -37,11 +38,11 @@ static int g_checks = 0;
 
 using Value = AudioActivityStateMachine::Value;
 
-// Default thresholds (ms), mirroring the Mac AppSettings defaults.
+// Thresholds (ms) matching the production defaults (AudioActivityStateMachine's constructor).
 static constexpr int64_t T_START = 200;
-static constexpr int64_t T_CONTINUOUS = 1500;
+static constexpr int64_t T_CONTINUOUS = 1000;
 static constexpr int64_t T_DROP_START = 300;
-static constexpr int64_t T_DROP_CONTINUOUS = 800;
+static constexpr int64_t T_DROP_CONTINUOUS = 2000;
 
 // Feed frames of a constant decision from startMs to endMs (exclusive) at `stepMs`,
 // returning the value on the last fed frame.
@@ -80,10 +81,10 @@ static void test_speech_start_promotes_to_continuous_from_rearmed_onset() {
     AudioActivityStateMachine m(T_START, T_CONTINUOUS, T_DROP_START, T_DROP_CONTINUOUS);
     feed(m, true, 0, 201, 20);                 // -> SpeechStart around t=200, onset re-armed
     EXPECT_EQ(m.value(), Value::SpeechStart);
-    // timeToContinuous (1500 ms) counts from the re-arm (~t=200), so we reach continuous
-    // around t=1700, NOT t=1500.
-    EXPECT_EQ(m.update(true, 1600), Value::SpeechStart);    // 1400 ms since re-arm
-    EXPECT_EQ(m.update(true, 1700), Value::ContinuousSpeech); // 1500 ms since re-arm
+    // timeToContinuous (1000 ms) counts from the re-arm (~t=200), so we reach continuous
+    // around t=1200, NOT t=1000.
+    EXPECT_EQ(m.update(true, 1100), Value::SpeechStart);    // 900 ms since re-arm
+    EXPECT_EQ(m.update(true, 1200), Value::ContinuousSpeech); // 1000 ms since re-arm
 }
 
 static void test_no_continuous_to_speech_start_edge() {
@@ -100,10 +101,10 @@ static void test_drop_from_continuous_uses_longer_threshold() {
     AudioActivityStateMachine m(T_START, T_CONTINUOUS, T_DROP_START, T_DROP_CONTINUOUS);
     feed(m, true, 0, 1800, 20); // ContinuousSpeech, silence onset cleared
     EXPECT_EQ(m.value(), Value::ContinuousSpeech);
-    // Silence begins at t=1800. timeToDropContinuous = 800 ms -> drop at t=2600.
+    // Silence begins at t=1800. timeToDropContinuous = 2000 ms -> drop at t=3800.
     EXPECT_EQ(m.update(false, 1800), Value::ContinuousSpeech); // silence onset = 1800
-    EXPECT_EQ(m.update(false, 2500), Value::ContinuousSpeech); // 700 ms < 800 ms
-    EXPECT_EQ(m.update(false, 2600), Value::SpeechEnd);        // 800 ms -> drop
+    EXPECT_EQ(m.update(false, 3700), Value::ContinuousSpeech); // 1900 ms < 2000 ms
+    EXPECT_EQ(m.update(false, 3800), Value::SpeechEnd);        // 2000 ms -> drop
 }
 
 static void test_drop_from_speech_start_uses_shorter_threshold() {
@@ -129,25 +130,51 @@ static void test_single_silent_frame_resets_voice_onset() {
 }
 
 static void test_worked_timeline_from_doc() {
-    // Reproduces the §3.4c worked timeline: end -> start -> cont -> end -> start.
+    // Reproduces the worked timeline: end -> start -> cont -> end -> start.
     // Voice onset is re-armed at the SpeechStart transition (~t=200), so continuous is
-    // reached at ~t=1700 (200 + timeToContinuous), not t=1500.
+    // reached at ~t=1200 (200 + timeToContinuous), not t=1000.
     AudioActivityStateMachine m(T_START, T_CONTINUOUS, T_DROP_START, T_DROP_CONTINUOUS);
     // Voice from t=0; SpeechStart at t=200.
     feed(m, true, 0, 220, 20);
     EXPECT_EQ(m.value(), Value::SpeechStart);
-    // Continuous at t=1700 (re-armed onset at 200 + 1500).
+    // Continuous at t=1200 (re-armed onset at 200 + 1000).
     feed(m, true, 220, 1720, 20);
     EXPECT_EQ(m.value(), Value::ContinuousSpeech);
     feed(m, true, 1720, 3500, 20);
     EXPECT_EQ(m.value(), Value::ContinuousSpeech);
-    // Silence from t=3500; timeToDropContinuous=800 -> SpeechEnd at t=4300.
-    feed(m, false, 3500, 4320, 20);
+    // Silence from t=3500; timeToDropContinuous=2000 -> SpeechEnd at t=5500.
+    feed(m, false, 3500, 5520, 20);
     EXPECT_EQ(m.value(), Value::SpeechEnd);
-    // Voice returns at t=4600; SpeechStart again at t=4800.
-    EXPECT_EQ(m.update(true, 4600), Value::SpeechEnd);
-    feed(m, true, 4620, 4820, 20);
+    // Voice returns at t=5600; SpeechStart again at t=5800.
+    EXPECT_EQ(m.update(true, 5600), Value::SpeechEnd);
+    feed(m, true, 5620, 5820, 20);
     EXPECT_EQ(m.value(), Value::SpeechStart);
+}
+
+static void test_gated_input_reaches_continuous_despite_sparse_unvoiced() {
+    // An aggressive raw VAD chops continuous speech with brief unvoiced blips. Fed raw, the
+    // continuous-voice onset clock keeps resetting and the machine never reaches
+    // ContinuousSpeech; fed the VadGate-smoothed decision (as production now does), it does.
+    // Voiced, but one unvoiced frame every 15 frames (~300 ms) — mimics mode-3 fvad chop.
+    auto rawAt = [](int f) { return (f % 15) != 14; };
+    const int kFrames = 200; // 4 s at 20 ms/frame
+
+    // Case A: raw decision straight into the state machine -> stuck at SpeechStart.
+    {
+        AudioActivityStateMachine m(T_START, T_CONTINUOUS, T_DROP_START, T_DROP_CONTINUOUS);
+        int64_t t = 0;
+        for (int f = 0; f < kFrames; ++f, t += 20) m.update(rawAt(f), t);
+        EXPECT_EQ(m.value(), Value::SpeechStart);
+    }
+
+    // Case B: same raw decision smoothed by the VadGate first -> reaches ContinuousSpeech.
+    {
+        AudioActivityStateMachine m(T_START, T_CONTINUOUS, T_DROP_START, T_DROP_CONTINUOUS);
+        VadGate gate(20, 50, 300); // frameMs, speechTriggerMs, silenceHangoverMs (production)
+        int64_t t = 0;
+        for (int f = 0; f < kFrames; ++f, t += 20) m.update(gate.update(rawAt(f)), t);
+        EXPECT_EQ(m.value(), Value::ContinuousSpeech);
+    }
 }
 
 static void test_reset_returns_to_speech_end() {
@@ -178,6 +205,8 @@ int main() {
         {"single_silent_frame_resets_voice_onset",
          test_single_silent_frame_resets_voice_onset},
         {"worked_timeline_from_doc", test_worked_timeline_from_doc},
+        {"gated_input_reaches_continuous_despite_sparse_unvoiced",
+         test_gated_input_reaches_continuous_despite_sparse_unvoiced},
         {"reset_returns_to_speech_end", test_reset_returns_to_speech_end},
     };
 

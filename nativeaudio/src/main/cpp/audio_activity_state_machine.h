@@ -29,11 +29,15 @@ public:
         SpeechStart = 2,       // just transitioned from silence into speech
     };
 
-    // Defaults match the Mac client's AppSettings defaults.
+    // Defaults match the reference (Mac) design's continuous-speech hysteresis: reach
+    // continuousSpeech after ~1s of (smoothed) voice, and require a full 2s of silence to drop
+    // from it — far longer than the 0.3s speechStart drop — so natural pauses between phrases do
+    // not knock an established speaker out of the top-N. (Fed the VadGate-smoothed decision; see
+    // NativeVad::shouldTransmit.)
     AudioActivityStateMachine(int64_t timeToSpeechStartMs = 200,
-                              int64_t timeToContinuousMs = 1500,
+                              int64_t timeToContinuousMs = 1000,
                               int64_t timeToDropStartMs = 300,
-                              int64_t timeToDropContinuousMs = 800)
+                              int64_t timeToDropContinuousMs = 2000)
         : timeToSpeechStartMs_(timeToSpeechStartMs),
           timeToContinuousMs_(timeToContinuousMs),
           timeToDropStartMs_(timeToDropStartMs),

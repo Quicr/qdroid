@@ -1317,9 +1317,21 @@ fun SettingsScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Voice Activity Detection")
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Voice Activity Detection")
+                            if (topNEnabled) {
+                                Text(
+                                    text = "Required by Active Speaker",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
                         Switch(
-                            checked = vadEnabled,
+                            // Active Speaker mandates VAD: force it on and lock the toggle while
+                            // Top-N is enabled.
+                            checked = vadEnabled || topNEnabled,
+                            enabled = !topNEnabled,
                             onCheckedChange = { enabled ->
                                 vadEnabled = enabled
                                 // Save to preferences
@@ -1375,7 +1387,10 @@ fun SettingsScreen(
                             onCheckedChange = { enabled ->
                                 topNEnabled = enabled
                                 com.cisco.quadroid.util.PreferencesManager.setTopNEnabled(context, enabled)
+                                // setTopNEnabled forces VAD on when enabling and restores it to the
+                                // pre-Top-N state when disabling; reflect the result in the switch.
                                 viewModel.setTopNEnabled(enabled)
+                                vadEnabled = com.cisco.quadroid.util.PreferencesManager.getVadEnabled(context)
                             }
                         )
                     }

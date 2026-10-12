@@ -15,36 +15,28 @@ class VideoVADTransitionTest {
     private val start = AudioActivityValue.SPEECH_START.raw
 
     @Test
-    fun `rise requests keyframe and no subgroup roll`() {
+    fun `rise requests keyframe`() {
         val t = VideoVADTransition()
         val action = t.update(start) // 0 -> 2
         assertTrue(action.requestKeyframe)
-        assertFalse(action.rollSubgroup)
         assertEquals(start, action.value)
     }
 
     @Test
-    fun `equal value requests neither`() {
+    fun `equal value requests no keyframe`() {
         val t = VideoVADTransition()
         t.update(start)
         val action = t.update(start) // 2 -> 2
         assertFalse(action.requestKeyframe)
-        assertFalse(action.rollSubgroup)
     }
 
     @Test
-    fun `fall does not request keyframe and rolls subgroup only when enabled`() {
-        val withoutRoll = VideoVADTransition(rollSubgroupEnabled = false)
-        withoutRoll.update(start)
-        val a1 = withoutRoll.update(cont) // 2 -> 1
+    fun `fall does not request keyframe`() {
+        val t = VideoVADTransition()
+        t.update(start)
+        val a1 = t.update(cont) // 2 -> 1
         assertFalse(a1.requestKeyframe)
-        assertFalse(a1.rollSubgroup)
-
-        val withRoll = VideoVADTransition(rollSubgroupEnabled = true)
-        withRoll.update(start)
-        val a2 = withRoll.update(cont) // 2 -> 1
-        assertFalse(a2.requestKeyframe)
-        assertTrue(a2.rollSubgroup)
+        assertEquals(cont, a1.value)
     }
 
     @Test

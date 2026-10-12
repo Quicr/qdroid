@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <vector>
+#include <chrono>
 #include <android/log.h>
 #include <quicr/session.h>
 #include <quicr/session_manager.h>
@@ -31,6 +32,21 @@ JavaVM* g_jvm = nullptr;
 // 2=speechStart). Must match the relay's expected property type and the Kotlin
 // AppHeaders.AUDIO_ACTIVITY_INDICATOR constant.
 static constexpr uint64_t AUDIO_ACTIVITY_INDICATOR = 12;
+
+// Per received VIDEO track (keyed by full track name): the latest Top-N voice-activity value
+// (0/1/2, -1 if no header seen) and the monotonic time of the last object received. Written on the
+// transport thread in ObjectReceived; read by Kotlin via nativeGetTrackActivity / nativeGetTrackIdleMs
+// so the subscriber can both (a) rank display tiles by activity and (b) tell which tracks the relay
+// is actually forwarding right now (recent objects), independent of whether a tile/jitter-buffer
+// exists yet. This decouples display selection from the lazy per-tile jitter buffer.
+struct RxTrackState { int activity = -1; int64_t lastSeenMs = 0; };
+static std::mutex g_track_activity_mutex;
+static std::unordered_map<std::string, RxTrackState> g_track_activity;
+
+static int64_t steady_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 // Forward declarations
 class AndroidPublishTrackHandler;
@@ -239,6 +255,24 @@ public:
         // Check if this is a video track - route to jitter buffer
         if (track_name_str.find("video") != std::string::npos) {
             LOGI("Video track detected: %s", track_name_str.c_str());
+
+            // Record the Top-N activity value (header 12) and mark this track as freshly forwarded.
+            // Value shape mirrors the publish side: extensions[12] = {{ byte }}. Any received video
+            // object (header or not) refreshes lastSeenMs so the client knows the relay is currently
+            // forwarding this track.
+            int observed_activity = -1;
+            if (hdr.extensions.has_value()) {
+                auto ext = hdr.extensions->find(AUDIO_ACTIVITY_INDICATOR);
+                if (ext != hdr.extensions->end() && !ext->second.empty() && !ext->second[0].empty()) {
+                    observed_activity = static_cast<int>(ext->second[0][0]);
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lk(g_track_activity_mutex);
+                auto& st = g_track_activity[track_name_str];
+                if (observed_activity >= 0) st.activity = observed_activity; // keep last-known on gaps
+                st.lastSeenMs = steady_now_ms();
+            }
             auto& manager = VideoJitterBufferManager::getInstance();
             if (auto* buffer = manager.getBuffer(track_name_str)) {
                 // Video frame goes directly to jitter buffer (C++ optimization)
@@ -1213,6 +1247,34 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeEndSubGroup(JNIEnv *env, jobje
 //==============================================================================
 // Video Jitter Buffer JNI Methods
 //==============================================================================
+
+// Returns the latest Top-N activity value (0/1/2) observed on the given video track's objects,
+// or -1 if none has been seen. Used by the subscriber to rank display tiles by activity.
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeGetTrackActivity(
+    JNIEnv* env, jobject /*thiz*/, jstring track_name)
+{
+    std::string name = jstring_to_string(env, track_name);
+    std::lock_guard<std::mutex> lk(g_track_activity_mutex);
+    auto it = g_track_activity.find(name);
+    return it != g_track_activity.end() ? static_cast<jint>(it->second.activity) : static_cast<jint>(-1);
+}
+
+// Returns milliseconds since the last object was received on the given video track (i.e. how long
+// the relay has NOT been forwarding it). Returns a large value if never seen. Lets the subscriber
+// display exactly the tracks the relay is currently forwarding, regardless of jitter-buffer state.
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeGetTrackIdleMs(
+    JNIEnv* env, jobject /*thiz*/, jstring track_name)
+{
+    std::string name = jstring_to_string(env, track_name);
+    std::lock_guard<std::mutex> lk(g_track_activity_mutex);
+    auto it = g_track_activity.find(name);
+    if (it == g_track_activity.end()) return static_cast<jlong>(24L * 60L * 60L * 1000L); // ~1 day
+    return static_cast<jlong>(steady_now_ms() - it->second.lastSeenMs);
+}
 
 extern "C"
 JNIEXPORT void JNICALL

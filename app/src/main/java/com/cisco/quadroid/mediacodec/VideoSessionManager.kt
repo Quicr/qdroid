@@ -192,6 +192,14 @@ class VideoSessionManager @Inject constructor(
         Log.e("QUADROID_DEBUG", "VideoSessionManager INIT - deviceId=$deviceId")
         Log.e(tag, "⭐ VideoSessionManager initialized with deviceId=$deviceId, meetingId=$meetingId")
 
+        // Let the participant manager read, per track, the relay's latest activity value and how
+        // long since it last forwarded an object — so it displays exactly the forwarded tracks,
+        // ranked by voice activity, regardless of per-tile jitter-buffer state.
+        (moqTransport as? MoqNative)?.let { native ->
+            participantManager.activityProvider = { fullName -> native.nativeGetTrackActivity(fullName) }
+            participantManager.idleMsProvider = { fullName -> native.nativeGetTrackIdleMs(fullName) }
+        }
+
         // Observe connection status and subscribe to catalog when connected
         scope.launch {
             connectionStatus.collect { status ->
@@ -354,6 +362,18 @@ class VideoSessionManager @Inject constructor(
         // is always delivered), and the grid is clamped to N when enabled.
         topNEnabled = PreferencesManager.getTopNEnabled(context)
         topNCount = PreferencesManager.getTopNCount(context)
+        // Active Speaker (Top-N) mandates VAD: the relay ranks publishers by the activity header,
+        // which is only produced while VAD runs. Snapshot the prior VAD state (so it can be restored
+        // when Top-N is disabled) and force it on before audio capture reads the pref.
+        if (topNEnabled) {
+            if (!PreferencesManager.hasVadBeforeTopN(context)) {
+                PreferencesManager.setVadBeforeTopN(context, PreferencesManager.getVadEnabled(context))
+            }
+            if (!PreferencesManager.getVadEnabled(context)) {
+                PreferencesManager.setVadEnabled(context, true)
+                Log.i(tag, "Top-N on: forcing VAD enabled (required for active-speaker ranking)")
+            }
+        }
         SharedVoiceActivityState.setEnabled(topNEnabled)
         participantManager.setMaxDisplayCount(if (topNEnabled) topNCount else null)
 
@@ -619,6 +639,27 @@ class VideoSessionManager @Inject constructor(
      */
     fun setTopNEnabled(enabled: Boolean) {
         topNEnabled = enabled
+        // Active Speaker mandates VAD (the relay ranks by the activity header, produced only while
+        // VAD runs). Force VAD on while Top-N is enabled, remembering the prior VAD state so it can
+        // be restored when Top-N is turned off.
+        if (enabled) {
+            if (!PreferencesManager.hasVadBeforeTopN(context)) {
+                PreferencesManager.setVadBeforeTopN(context, PreferencesManager.getVadEnabled(context))
+            }
+            if (!PreferencesManager.getVadEnabled(context)) {
+                PreferencesManager.setVadEnabled(context, true)
+                audioManager.setVadEnabled(true)
+                Log.i(tag, "Top-N enabled: forcing VAD on (required for active-speaker ranking)")
+            }
+        } else if (PreferencesManager.hasVadBeforeTopN(context)) {
+            val restore = PreferencesManager.getVadBeforeTopN(context)
+            PreferencesManager.clearVadBeforeTopN(context)
+            if (PreferencesManager.getVadEnabled(context) != restore) {
+                PreferencesManager.setVadEnabled(context, restore)
+                audioManager.setVadEnabled(restore)
+                Log.i(tag, "Top-N disabled: restored VAD to pre-Top-N state ($restore)")
+            }
+        }
         SharedVoiceActivityState.setEnabled(enabled)
         participantManager.setMaxDisplayCount(if (enabled) topNCount else null)
         Log.i(tag, "Top-N ${if (enabled) "enabled (N=$topNCount)" else "disabled"}")
@@ -668,12 +709,19 @@ class VideoSessionManager @Inject constructor(
             // Clean split: video gets the relay-side Top-N filter; audio is unfiltered.
             videoNamespacePrefix = videoPrefix
             audioNamespacePrefix = audioPrefix
+            // The relay ranks every video track under this prefix — including OUR OWN published
+            // quality tracks, which we discard client-side in onMatch. If we only asked for
+            // topNCount tracks, our own (high-ranked when we speak, or muted+camera-on=1) could
+            // consume all N slots and we'd see no remote video. Reserve extra slots for our own
+            // tracks so N *remote* tracks still fit.
+            val ownVideoTracks = synchronized(encoderConfigsLock) { videoEncoderConfigs.size }
+            val maxTracks = topNCount + ownVideoTracks
             val filter = NamespaceFilter(
                 propertyType = AppHeaders.AUDIO_ACTIVITY_INDICATOR,
-                maxTracks = topNCount,
+                maxTracks = maxTracks,
                 timeoutMs = topNTimeoutMs
             )
-            Log.i(tag, "Top-N ON: video=$videoPrefix (maxTracks=$topNCount), audio=$audioPrefix (unfiltered)")
+            Log.i(tag, "Top-N ON: video=$videoPrefix (maxTracks=$maxTracks = N=$topNCount + own=$ownVideoTracks), audio=$audioPrefix (unfiltered)")
             moqTransport.subscribeNamespace(videoPrefix, callback, filter)
             moqTransport.subscribeNamespace(audioPrefix, callback, null)
         } else {

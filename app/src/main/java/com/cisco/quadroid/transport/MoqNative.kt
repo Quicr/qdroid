@@ -233,6 +233,13 @@ class MoqNative(override val trackCallbacks: ConcurrentMap<String, MoqObjectCall
 
 
 
+    // Latest Top-N activity value (0/1/2) seen on a received video track, or -1 if none.
+    external fun nativeGetTrackActivity(trackName: String): Int
+
+    // Milliseconds since the last object was received on a video track (how long the relay has not
+    // been forwarding it); large if never seen.
+    external fun nativeGetTrackIdleMs(trackName: String): Long
+
     // Video jitter buffer methods
     external fun nativeCreateVideoJitterBuffer(trackName: String, callback: VideoJitterBufferCallback)
     external fun nativeDestroyVideoJitterBuffer(trackName: String)

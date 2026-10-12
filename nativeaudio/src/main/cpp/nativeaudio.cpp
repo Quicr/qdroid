@@ -90,11 +90,16 @@ public:
         // Advance the Top-N activity state machine on every frame. Time is derived from
         // the fixed frame cadence (monotonic, deterministic — no wall clock needed).
         nowMs_ += VAD_FRAME_MS;
-        activity_.update(voiced, nowMs_);
 
-        // The speech/silence hysteresis lives in VadGate (see vad_gate.h) so it can
-        // be unit-tested on the host independently of libfvad.
-        return gate_.update(voiced);
+        // Feed the hysteresis-smoothed decision (NOT the raw choppy fvad output) into the
+        // 3-value state machine. Raw mode-3 fvad marks many in-speech frames unvoiced, which
+        // keeps resetting the continuous-speech onset timer so the machine flaps
+        // speechStart<->speechEnd and never settles at continuousSpeech. VadGate bridges
+        // sub-hangover gaps, so sustained speech is detected and held. The gate is also the
+        // transmit decision, so compute it once and reuse it.
+        const bool gatedSpeech = gate_.update(voiced);
+        activity_.update(gatedSpeech, nowMs_);
+        return gatedSpeech;
     }
 
     // Current 3-value active-speaker level: 0=speechEnd, 1=continuousSpeech, 2=speechStart.

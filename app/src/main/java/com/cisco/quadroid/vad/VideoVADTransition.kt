@@ -4,26 +4,23 @@
 package com.cisco.quadroid.vad
 
 /**
- * Action a video publisher should take when the shared voice-activity value changes,
- * compared against the value last committed to the wire.
+ * Action a video publisher should take when the shared voice-activity value changes, compared
+ * against the value last committed to the wire.
  *
- * Mirrors the Mac client's `VideoVADTransition`:
- * - A **rising** transition (e.g. `speechEnd(0) -> speechStart(2)`) is the only keyframe-worthy
- *   one: forcing an IDR means a receiver the relay just swapped into its top-N can decode
- *   immediately with no fetch / key-frame-request round trip.
- * - A **falling** transition only affects ranking, so it needs no IDR; optionally the encoder
- *   rolls a subgroup so the relay sees the value change at a clean boundary (gated by
- *   [rollSubgroupEnabled]).
+ * A **rising** transition (e.g. `speechEnd(0) -> speechStart(2)`) is the only keyframe-worthy one:
+ * forcing an IDR means a receiver the relay just swapped into its top-N can decode immediately with
+ * no fetch / key-frame-request round trip.
+ *
+ * The reference (Mac) design additionally rolls a *subgroup* on a falling transition to give the
+ * relay a clean boundary to observe the value drop. QDroid does not need that: it stamps the
+ * activity value on **every** published object (see [com.cisco.quadroid.transport.MoqMediaFramer]),
+ * so the relay sees any change on the very next object, and the framer uses a single subgroup per
+ * group. A falling transition therefore requires no action here.
  */
-class VideoVADTransition(
-    /** Whether a falling transition should roll a subgroup boundary. */
-    private val rollSubgroupEnabled: Boolean = false
-) {
+class VideoVADTransition {
     data class Action(
         /** Request an IDR on the next encode (rising transition). */
         val requestKeyframe: Boolean,
-        /** End the current subgroup at the next object (falling transition, if enabled). */
-        val rollSubgroup: Boolean,
         /** The value to stamp on outgoing objects. */
         val value: Int
     )
@@ -37,15 +34,7 @@ class VideoVADTransition(
     fun update(value: Int): Action {
         val previous = committed
         committed = value
-        return when {
-            value > previous -> Action(requestKeyframe = true, rollSubgroup = false, value = value)
-            value < previous -> Action(
-                requestKeyframe = false,
-                rollSubgroup = rollSubgroupEnabled,
-                value = value
-            )
-            else -> Action(requestKeyframe = false, rollSubgroup = false, value = value)
-        }
+        return Action(requestKeyframe = value > previous, value = value)
     }
 
     /** Current committed value (for tests / diagnostics). */

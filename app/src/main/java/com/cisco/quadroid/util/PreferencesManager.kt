@@ -18,6 +18,9 @@ object PreferencesManager {
     private const val KEY_CLOUDFLARE_OVERRIDE = "cloudflare_override"
     private const val KEY_TOPN_ENABLED = "topn_enabled"
     private const val KEY_TOPN_COUNT = "topn_count"
+    // Snapshot of the VAD enabled state taken when Top-N forced VAD on, so VAD can be restored to
+    // its pre-Top-N value when Top-N is disabled. Absent when Top-N is not holding VAD on.
+    private const val KEY_VAD_BEFORE_TOPN = "vad_before_topn"
 
     /** Allowed range for the Top-N active-speaker count. */
     const val TOPN_MIN_COUNT = 1
@@ -45,6 +48,30 @@ object PreferencesManager {
     fun setVadEnabled(context: Context, enabled: Boolean) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putBoolean(KEY_VAD_ENABLED, enabled).apply()
+    }
+
+    /** True if a pre-Top-N VAD snapshot is currently stored (Top-N is holding VAD on). */
+    fun hasVadBeforeTopN(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.contains(KEY_VAD_BEFORE_TOPN)
+    }
+
+    /** The stored pre-Top-N VAD state to restore when Top-N is disabled (defaults to enabled). */
+    fun getVadBeforeTopN(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_VAD_BEFORE_TOPN, true)
+    }
+
+    /** Records the VAD state to restore later; call once, when Top-N first forces VAD on. */
+    fun setVadBeforeTopN(context: Context, enabled: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(KEY_VAD_BEFORE_TOPN, enabled).apply()
+    }
+
+    /** Clears the pre-Top-N VAD snapshot (after restoring, or when no longer needed). */
+    fun clearVadBeforeTopN(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().remove(KEY_VAD_BEFORE_TOPN).apply()
     }
 
     /**
