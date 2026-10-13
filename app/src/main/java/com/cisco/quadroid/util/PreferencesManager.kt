@@ -16,6 +16,16 @@ object PreferencesManager {
     private const val KEY_CUSTOM_RELAY_URLS = "custom_relay_urls"
     private const val KEY_DEVELOPER_MODE = "developer_mode"
     private const val KEY_CLOUDFLARE_OVERRIDE = "cloudflare_override"
+    private const val KEY_TOPN_ENABLED = "topn_enabled"
+    private const val KEY_TOPN_COUNT = "topn_count"
+    // Snapshot of the VAD enabled state taken when Top-N forced VAD on, so VAD can be restored to
+    // its pre-Top-N value when Top-N is disabled. Absent when Top-N is not holding VAD on.
+    private const val KEY_VAD_BEFORE_TOPN = "vad_before_topn"
+
+    /** Allowed range for the Top-N active-speaker count. */
+    const val TOPN_MIN_COUNT = 1
+    const val TOPN_MAX_COUNT = 5
+    const val TOPN_DEFAULT_COUNT = 2
 
     /**
      * Gets the VAD (Voice Activity Detection) enabled state from preferences.
@@ -38,6 +48,30 @@ object PreferencesManager {
     fun setVadEnabled(context: Context, enabled: Boolean) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putBoolean(KEY_VAD_ENABLED, enabled).apply()
+    }
+
+    /** True if a pre-Top-N VAD snapshot is currently stored (Top-N is holding VAD on). */
+    fun hasVadBeforeTopN(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.contains(KEY_VAD_BEFORE_TOPN)
+    }
+
+    /** The stored pre-Top-N VAD state to restore when Top-N is disabled (defaults to enabled). */
+    fun getVadBeforeTopN(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_VAD_BEFORE_TOPN, true)
+    }
+
+    /** Records the VAD state to restore later; call once, when Top-N first forces VAD on. */
+    fun setVadBeforeTopN(context: Context, enabled: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(KEY_VAD_BEFORE_TOPN, enabled).apply()
+    }
+
+    /** Clears the pre-Top-N VAD snapshot (after restoring, or when no longer needed). */
+    fun clearVadBeforeTopN(context: Context) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().remove(KEY_VAD_BEFORE_TOPN).apply()
     }
 
     /**
@@ -163,5 +197,55 @@ object PreferencesManager {
     fun setCloudflareOverride(context: Context, enabled: Boolean) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putBoolean(KEY_CLOUDFLARE_OVERRIDE, enabled).apply()
+    }
+
+    /**
+     * Gets the Top-N active-speaker enabled state from preferences.
+     * Defaults to false (disabled) if not set.
+     *
+     * @param context The context used to access SharedPreferences.
+     * @return True if Top-N active-speaker filtering is enabled, false otherwise.
+     */
+    fun getTopNEnabled(context: Context): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_TOPN_ENABLED, false)
+    }
+
+    /**
+     * Saves the Top-N active-speaker enabled state to preferences.
+     *
+     * @param context The context used to access SharedPreferences.
+     * @param enabled True to enable Top-N active-speaker filtering, false to disable.
+     */
+    fun setTopNEnabled(context: Context, enabled: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(KEY_TOPN_ENABLED, enabled).apply()
+    }
+
+    /**
+     * Gets the number of active speakers (N) for Top-N from preferences.
+     * Defaults to [TOPN_DEFAULT_COUNT]; always returned clamped to
+     * [TOPN_MIN_COUNT]..[TOPN_MAX_COUNT].
+     *
+     * @param context The context used to access SharedPreferences.
+     * @return The number of active speakers to request/display.
+     */
+    fun getTopNCount(context: Context): Int {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getInt(KEY_TOPN_COUNT, TOPN_DEFAULT_COUNT)
+            .coerceIn(TOPN_MIN_COUNT, TOPN_MAX_COUNT)
+    }
+
+    /**
+     * Saves the number of active speakers (N) for Top-N to preferences.
+     * The value is clamped to [TOPN_MIN_COUNT]..[TOPN_MAX_COUNT] before saving.
+     *
+     * @param context The context used to access SharedPreferences.
+     * @param count The number of active speakers (will be clamped to 1..5).
+     */
+    fun setTopNCount(context: Context, count: Int) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val clamped = count.coerceIn(TOPN_MIN_COUNT, TOPN_MAX_COUNT)
+        prefs.edit().putInt(KEY_TOPN_COUNT, clamped).apply()
     }
 }

@@ -15,6 +15,7 @@ import com.cisco.quadroid.mediacodec.model.EncoderState
 import com.cisco.quadroid.mediacodec.model.VideoEncoderConfig
 import com.cisco.quadroid.transport.MoqMediaFramer
 import com.cisco.quadroid.transport.MoqTransport
+import java.util.concurrent.CopyOnWriteArrayList
 
 class VideoEncoderManager(
     private val moqTransport: MoqTransport,
@@ -25,7 +26,12 @@ class VideoEncoderManager(
     private val videoMimeType = MediaFormat.MIMETYPE_VIDEO_AVC
     private val iFrameInterval = 2
 
-    private val encoders = mutableListOf<EncoderState>()
+    // Touched from two threads: the catalog/native thread rebuilds the list in
+    // setupEncoders()/cleanup() while MediaCodec callbacks on the encoder thread iterate it
+    // (indexOfFirst) to track quality. A plain ArrayList throws ConcurrentModificationException
+    // under that overlap. CopyOnWriteArrayList gives lock-free, snapshot-safe iteration; the
+    // list is tiny and only rewritten on catalog changes, so copy-on-write cost is negligible.
+    private val encoders = CopyOnWriteArrayList<EncoderState>()
     private var activeEncoderIndex = 0
     private var consecutiveGoodFrames = 0
     private var lastEncoderError = 0L
@@ -41,6 +47,7 @@ class VideoEncoderManager(
     val activeInputSurface: Surface?
         get() = encoders.getOrNull(activeEncoderIndex)?.inputSurface
 
+    @Synchronized
     fun setupEncoders(configs: List<VideoEncoderConfig>) {
         // Catalog updates fire repeatedly (every refresh/delta), each invoking this
         // method. Rebuilding encoders every time leaks MediaCodec instances and exhausts
@@ -78,8 +85,25 @@ class VideoEncoderManager(
                     }
                 }
 
-                // Create framer for this track
-                val framer = MoqMediaFramer(moqTransport, config.trackNameUrl)
+                // Create framer for this track. The framer requests an IDR (sync frame) on a
+                // rising voice-activity transition so a just-swapped-in Top-N subscriber can
+                // decode immediately. codecRef is assigned right after the codec is created.
+                var codecRef: MediaCodec? = null
+                val framer = MoqMediaFramer(
+                    moqTransport,
+                    config.trackNameUrl,
+                    onRequestKeyframe = {
+                        codecRef?.let { c ->
+                            try {
+                                c.setParameters(android.os.Bundle().apply {
+                                    putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                                })
+                            } catch (e: IllegalStateException) {
+                                Log.w(tag, "Failed to request sync frame for ${config.trackNameUrl}", e)
+                            }
+                        }
+                    }
+                )
 
                 val codec = MediaCodec.createEncoderByType(videoMimeType).apply {
                     setCallback(object : MediaCodec.Callback() {
@@ -145,6 +169,7 @@ class VideoEncoderManager(
                     configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 }
                 encoder = codec
+                codecRef = codec
 
                 val surface = codec.createInputSurface()
                 inputSurface = surface
@@ -244,6 +269,7 @@ class VideoEncoderManager(
         }
     }
 
+    @Synchronized
     fun cleanup() {
         encoderHandler.removeCallbacksAndMessages(null)
 
@@ -268,6 +294,7 @@ class VideoEncoderManager(
         Log.i(tag, "Encoder cleanup complete")
     }
 
+    @Synchronized
     fun shutdown() {
         cleanup()
         encoderThread.quitSafely()

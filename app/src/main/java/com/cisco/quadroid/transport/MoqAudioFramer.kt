@@ -5,6 +5,7 @@ package com.cisco.quadroid.transport
 
 import android.media.MediaCodec
 import android.util.Log
+import com.cisco.quadroid.vad.SharedVoiceActivityState
 import java.nio.ByteBuffer
 
 /**
@@ -21,6 +22,8 @@ class MoqAudioFramer(
     private val tag = "MoqAudioFramer"
     private var currentGroupId: Long = (System.currentTimeMillis() and 0xFFFFFFFFL) + 1000000 // Offset to avoid collisions with video
     private var frameCount = 0
+    // Last activity value we logged, to log only on change (not per packet).
+    private var lastLoggedActivity = Int.MIN_VALUE
 
     fun processFrame(buffer: ByteBuffer, info: MediaCodec.BufferInfo) {
         frameCount++
@@ -28,7 +31,14 @@ class MoqAudioFramer(
             Log.d(tag, "Processing Opus frame $frameCount, size=${info.size}, groupId=$currentGroupId")
         }
 
-        // Each audio packet is its own group with objectId=0
+        // Each audio packet is its own group with objectId=0. Stamp the current voice-activity
+        // value so the relay can rank this publisher for Top-N (-1 => no header when disabled).
+        val activityValue = SharedVoiceActivityState.activityValueForSend()
+        // Log the stamped 3-value indicator only when it changes (-1 => Top-N off / no header).
+        if (activityValue != lastLoggedActivity) {
+            lastLoggedActivity = activityValue
+            Log.d(tag, "Stamping activityIndicator=$activityValue on AUDIO $trackName")
+        }
         transport.sendObject(
             trackName = trackName,
             groupId = currentGroupId,
@@ -36,7 +46,8 @@ class MoqAudioFramer(
             payload = buffer,
             priority = 1, // Audio often higher priority than video
             deliveryTimeoutMs = 1000,
-            useDatagram = true // Audio can use datagrams for lower latency
+            useDatagram = true, // Audio can use datagrams for lower latency
+            activityValue = activityValue
         )
 
         // Increment group ID for next packet

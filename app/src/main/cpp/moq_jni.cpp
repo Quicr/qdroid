@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <vector>
+#include <chrono>
 #include <android/log.h>
 #include <quicr/session.h>
 #include <quicr/session_manager.h>
@@ -25,6 +26,27 @@
 
 // Global JVM reference (non-static to allow access from video_jitter_buffer.cpp)
 JavaVM* g_jvm = nullptr;
+
+// Per-object MoQ extension header id the relay ranks on for Top-N active-speaker
+// filtering. Carries the 3-value voice-activity state (0=speechEnd, 1=continuousSpeech,
+// 2=speechStart). Must match the relay's expected property type and the Kotlin
+// AppHeaders.AUDIO_ACTIVITY_INDICATOR constant.
+static constexpr uint64_t AUDIO_ACTIVITY_INDICATOR = 12;
+
+// Per received VIDEO track (keyed by full track name): the latest Top-N voice-activity value
+// (0/1/2, -1 if no header seen) and the monotonic time of the last object received. Written on the
+// transport thread in ObjectReceived; read by Kotlin via nativeGetTrackActivity / nativeGetTrackIdleMs
+// so the subscriber can both (a) rank display tiles by activity and (b) tell which tracks the relay
+// is actually forwarding right now (recent objects), independent of whether a tile/jitter-buffer
+// exists yet. This decouples display selection from the lazy per-tile jitter buffer.
+struct RxTrackState { int activity = -1; int64_t lastSeenMs = 0; };
+static std::mutex g_track_activity_mutex;
+static std::unordered_map<std::string, RxTrackState> g_track_activity;
+
+static int64_t steady_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 // Forward declarations
 class AndroidPublishTrackHandler;
@@ -192,6 +214,9 @@ public:
                                       false) // not publisher-initiated
       , callback_ref_(callback_ref)
     {
+        // Allow this subscription to send MoQT new-group (keyframe) requests to the relay. Used on
+        // a Top-N swap-in when we join a track mid-group (see ObjectReceived).
+        SupportNewGroupRequest(true);
         LOGI("Created AndroidSubscribeTrackHandler");
     }
 
@@ -216,6 +241,28 @@ public:
         track_name_str += "/";
         track_name_str += std::string(ftn.name.begin(), ftn.name.end());
 
+        // Top-N swap-in keyframe request: when the relay starts forwarding this VIDEO track to us
+        // mid-group — i.e. the first object after (re)entry has object_id > 0 — we've missed the
+        // group's keyframe, so the decoder can't start. Ask the relay/publisher for a new group
+        // (IDR) now instead of waiting up to a full keyframe interval. A forwarding gap (relay
+        // swapped us out then back in) or a fresh subscription both count as (re)entry.
+        if (track_name_str.find("video") != std::string::npos) {
+            const int64_t now_ms = steady_now_ms();
+            if (now_ms - last_object_ms_ > kForwardingGapMs) {
+                seen_group_start_ = false;      // (re)entry: relay just started forwarding to us
+                requested_new_group_ = false;
+            }
+            last_object_ms_ = now_ms;
+            if (hdr.object_id == 0) {
+                seen_group_start_ = true;       // clean group start — nothing to request
+            } else if (!seen_group_start_ && !requested_new_group_) {
+                LOGI("Top-N swap-in mid-group (obj=%llu) for %s: requesting new group (keyframe)",
+                     (unsigned long long)hdr.object_id, track_name_str.c_str());
+                RequestNewGroup();              // libquicr: SUBSCRIBE_UPDATE new-group request
+                requested_new_group_ = true;
+            }
+        }
+
         // Unwrap LOC container
         LocUnwrapResult locResult = LocWrapper::unwrap(data.data(), data.size());
 
@@ -233,6 +280,24 @@ public:
         // Check if this is a video track - route to jitter buffer
         if (track_name_str.find("video") != std::string::npos) {
             LOGI("Video track detected: %s", track_name_str.c_str());
+
+            // Record the Top-N activity value (header 12) and mark this track as freshly forwarded.
+            // Value shape mirrors the publish side: extensions[12] = {{ byte }}. Any received video
+            // object (header or not) refreshes lastSeenMs so the client knows the relay is currently
+            // forwarding this track.
+            int observed_activity = -1;
+            if (hdr.extensions.has_value()) {
+                auto ext = hdr.extensions->find(AUDIO_ACTIVITY_INDICATOR);
+                if (ext != hdr.extensions->end() && !ext->second.empty() && !ext->second[0].empty()) {
+                    observed_activity = static_cast<int>(ext->second[0][0]);
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lk(g_track_activity_mutex);
+                auto& st = g_track_activity[track_name_str];
+                if (observed_activity >= 0) st.activity = observed_activity; // keep last-known on gaps
+                st.lastSeenMs = steady_now_ms();
+            }
             auto& manager = VideoJitterBufferManager::getInstance();
             if (auto* buffer = manager.getBuffer(track_name_str)) {
                 // Video frame goes directly to jitter buffer (C++ optimization)
@@ -327,6 +392,13 @@ public:
 
 private:
     jobject callback_ref_;
+
+    // Swap-in keyframe-request state (video). A forwarding gap longer than this is treated as a
+    // (re)entry — the relay started forwarding this track to us (Top-N swap-in or fresh subscribe).
+    static constexpr int64_t kForwardingGapMs = 500;
+    bool seen_group_start_ = false;     // have we seen object_id==0 (group start) since entry?
+    bool requested_new_group_ = false;  // have we already asked for a new group this entry?
+    int64_t last_object_ms_ = 0;        // monotonic time of the last received object
 };
 
 //==============================================================================
@@ -352,8 +424,9 @@ class AndroidSubscribeNamespaceHandler : public quicr::SubscribeNamespaceHandler
 {
 public:
     AndroidSubscribeNamespaceHandler(const quicr::TrackNamespace& prefix,
-                                     jobject callback_ref)
-      : quicr::SubscribeNamespaceHandler(prefix, quicr::SubscribeNamespaceHandler::Mode::kTracks)
+                                     jobject callback_ref,
+                                     const quicr::messages::Filter& filter = std::monostate{})
+      : quicr::SubscribeNamespaceHandler(prefix, quicr::SubscribeNamespaceHandler::Mode::kTracks, filter)
       , callback_ref_(callback_ref)
       , callback_valid_(true)
     {
@@ -361,10 +434,11 @@ public:
     }
 
     static std::shared_ptr<AndroidSubscribeNamespaceHandler> Create(const quicr::TrackNamespace& prefix,
-                                                                      jobject callback_ref)
+                                                                      jobject callback_ref,
+                                                                      const quicr::messages::Filter& filter = std::monostate{})
     {
         return std::shared_ptr<AndroidSubscribeNamespaceHandler>(
-            new AndroidSubscribeNamespaceHandler(prefix, callback_ref));
+            new AndroidSubscribeNamespaceHandler(prefix, callback_ref, filter));
     }
 
     jobject GetCallbackRef() const {
@@ -707,7 +781,26 @@ Java_com_cisco_quadroid_transport_MoqNative_nativePublishNamespace(JNIEnv *env, 
         context->publish_ns_handlers[prefix] = handler;
     }
 
-    context->session->PublishNamespace(handler);
+    // PublishNamespace can create a QUIC stream via CreateStreamOnPqThread, which throws
+    // PicoQuicException on a transient 100ms stream-creation miss. Guard + retry so a flaky
+    // Join does not abort the process.
+    bool announced = false;
+    for (int attempt = 0; attempt < 5 && !announced; ++attempt) {
+        try {
+            context->session->PublishNamespace(handler);
+            announced = true;
+        } catch (const std::exception& e) {
+            LOGW("nativePublishNamespace: threw on attempt %d for %s: %s", attempt, prefix.c_str(), e.what());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        } catch (...) {
+            LOGW("nativePublishNamespace: threw (unknown) on attempt %d for %s", attempt, prefix.c_str());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    if (!announced) {
+        LOGE("nativePublishNamespace: giving up announcing %s after retries", prefix.c_str());
+        return;
+    }
 
     LOGI("nativePublishNamespace: Announced namespace %s", prefix.c_str());
 }
@@ -750,7 +843,28 @@ Java_com_cisco_quadroid_transport_MoqNative_nativePublish(JNIEnv *env, jobject t
     );
 
     context->callbacks->add_publish_handler(name, handler);
-    context->session->PublishTrack(handler);
+
+    // PublishTrack can create a QUIC stream via CreateStreamOnPqThread, which throws
+    // PicoQuicException on a transient 100ms stream-creation miss. Guard + retry so a flaky
+    // Join degrades to a failed publish instead of aborting the process.
+    bool published = false;
+    for (int attempt = 0; attempt < 5 && !published; ++attempt) {
+        try {
+            context->session->PublishTrack(handler);
+            published = true;
+        } catch (const std::exception& e) {
+            LOGW("nativePublish: PublishTrack threw on attempt %d for %s: %s", attempt, name.c_str(), e.what());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        } catch (...) {
+            LOGW("nativePublish: PublishTrack threw (unknown) on attempt %d for %s", attempt, name.c_str());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    if (!published) {
+        LOGE("nativePublish: giving up publishing %s after retries", name.c_str());
+        context->callbacks->remove_publish_handler(name);
+        return;
+    }
 
     LOGI("nativePublish: Published track %s", name.c_str());
 }
@@ -783,7 +897,8 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
                                                            jlong object_id, jobject payload,
                                                            jint payload_size, jint priority,
                                                            jlong delivery_timeout_ms,
-                                                           jboolean use_datagram)
+                                                           jboolean use_datagram,
+                                                           jint activity_value)
 {
     auto context = reinterpret_cast<MoqContext *>(ptr);
     std::string name = jstring_to_string(env, track_name);
@@ -856,6 +971,15 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
         .extensions = std::nullopt,
         .immutable_extensions = std::nullopt
     };
+
+    // Top-N: stamp the current 3-value voice-activity state as a per-object MoQ extension
+    // header so the relay can rank this publisher. activity_value < 0 means "no header"
+    // (Top-N disabled) — the object is then byte-for-byte identical to the legacy path.
+    if (activity_value >= 0) {
+        quicr::Extensions extensions;
+        extensions[AUDIO_ACTIVITY_INDICATOR] = { { static_cast<uint8_t>(activity_value) } };
+        headers.extensions = std::move(extensions);
+    }
 
     try {
         quicr::BytesSpan data_span(locWrappedData.data(), locWrappedData.size());  // Use LOC-wrapped data
@@ -939,7 +1063,10 @@ JNIEXPORT void JNICALL
 Java_com_cisco_quadroid_transport_MoqNative_nativeSubscribeNamespace(JNIEnv *env, jobject thiz,
                                                                    jlong ptr,
                                                                    jstring namespace_prefix,
-                                                                   jobject callback)
+                                                                   jobject callback,
+                                                                   jlong property_type,
+                                                                   jlong max_tracks,
+                                                                   jlong timeout_ms)
 {
     auto context = reinterpret_cast<MoqContext *>(ptr);
     std::string prefix = jstring_to_string(env, namespace_prefix);
@@ -954,14 +1081,52 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSubscribeNamespace(JNIEnv *env
     auto track_ns = make_track_namespace(prefix);
     jobject callback_ref = env->NewGlobalRef(callback);
 
-    auto handler = AndroidSubscribeNamespaceHandler::Create(track_ns, callback_ref);
+    // Top-N: when property_type >= 0 and max_tracks > 0, attach a relay-side TrackFilter so the
+    // relay forwards only the top max_tracks publishers ranked by the property. Otherwise no
+    // filter (std::monostate) — unchanged behavior, all matching tracks delivered.
+    quicr::messages::Filter filter = std::monostate{};
+    if (property_type >= 0 && max_tracks > 0) {
+        filter = quicr::messages::TrackFilter{
+            static_cast<std::uint64_t>(property_type),
+            static_cast<std::uint64_t>(max_tracks),
+            static_cast<std::uint64_t>(timeout_ms)
+        };
+        LOGI("nativeSubscribeNamespace: attaching TrackFilter(property=%lld, maxTracks=%lld, timeoutMs=%lld)",
+             (long long)property_type, (long long)max_tracks, (long long)timeout_ms);
+    }
+
+    auto handler = AndroidSubscribeNamespaceHandler::Create(track_ns, callback_ref, filter);
 
     {
         std::lock_guard<std::mutex> lock(context->ns_handlers_mutex);
         context->subscribe_ns_handlers[prefix] = handler;
     }
 
-    context->session->SubscribeNamespace(handler);
+    // SubscribeNamespace creates a QUIC request stream via CreateStreamOnPqThread, which waits
+    // only 100ms for the picoquic thread and throws PicoQuicException on a transient miss. An
+    // uncaught throw here aborts the whole process (SIGABRT), which showed up as a flaky crash
+    // on Join. Catch and retry a few times so a transient stream-creation timeout degrades to a
+    // failed subscribe instead of killing the app. The throw happens while creating the request
+    // stream (before the SUBSCRIBE_NAMESPACE is sent), so retrying is safe.
+    bool subscribed = false;
+    for (int attempt = 0; attempt < 5 && !subscribed; ++attempt) {
+        try {
+            context->session->SubscribeNamespace(handler);
+            subscribed = true;
+        } catch (const std::exception& e) {
+            LOGW("nativeSubscribeNamespace: SubscribeNamespace threw on attempt %d for %s: %s",
+                 attempt, prefix.c_str(), e.what());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        } catch (...) {
+            LOGW("nativeSubscribeNamespace: SubscribeNamespace threw (unknown) on attempt %d for %s",
+                 attempt, prefix.c_str());
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    if (!subscribed) {
+        LOGE("nativeSubscribeNamespace: giving up subscribing to %s after retries", prefix.c_str());
+        return;
+    }
 
     // Wait for OK status
     int retries = 50; // 5 seconds
@@ -1114,6 +1279,34 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeEndSubGroup(JNIEnv *env, jobje
 //==============================================================================
 // Video Jitter Buffer JNI Methods
 //==============================================================================
+
+// Returns the latest Top-N activity value (0/1/2) observed on the given video track's objects,
+// or -1 if none has been seen. Used by the subscriber to rank display tiles by activity.
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeGetTrackActivity(
+    JNIEnv* env, jobject /*thiz*/, jstring track_name)
+{
+    std::string name = jstring_to_string(env, track_name);
+    std::lock_guard<std::mutex> lk(g_track_activity_mutex);
+    auto it = g_track_activity.find(name);
+    return it != g_track_activity.end() ? static_cast<jint>(it->second.activity) : static_cast<jint>(-1);
+}
+
+// Returns milliseconds since the last object was received on the given video track (i.e. how long
+// the relay has NOT been forwarding it). Returns a large value if never seen. Lets the subscriber
+// display exactly the tracks the relay is currently forwarding, regardless of jitter-buffer state.
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_com_cisco_quadroid_transport_MoqNative_nativeGetTrackIdleMs(
+    JNIEnv* env, jobject /*thiz*/, jstring track_name)
+{
+    std::string name = jstring_to_string(env, track_name);
+    std::lock_guard<std::mutex> lk(g_track_activity_mutex);
+    auto it = g_track_activity.find(name);
+    if (it == g_track_activity.end()) return static_cast<jlong>(24L * 60L * 60L * 1000L); // ~1 day
+    return static_cast<jlong>(steady_now_ms() - it->second.lastSeenMs);
+}
 
 extern "C"
 JNIEXPORT void JNICALL

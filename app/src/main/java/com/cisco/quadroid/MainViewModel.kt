@@ -129,6 +129,14 @@ class MainViewModel @Inject constructor(
     fun setVadEnabled(enabled: Boolean) {
         videoSessionManager.setVadEnabled(enabled)
     }
+
+    fun setTopNEnabled(enabled: Boolean) {
+        videoSessionManager.setTopNEnabled(enabled)
+    }
+
+    fun setTopNCount(count: Int) {
+        videoSessionManager.setTopNCount(count)
+    }
 }
 
 sealed class CallUiState {

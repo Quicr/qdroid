@@ -116,7 +116,36 @@ val vadHostTest by tasks.registering(Exec::class) {
     commandLine(vadTestBinary.get().asFile.absolutePath)
 }
 
-// Run the native VAD tests as part of `check` (and therefore `build`).
+// --- Audio activity (3-value Top-N) state machine host tests ---------------
+val aasmTestBinary = vadTestOutputDir.map { it.file("audio_activity_state_machine_test") }
+
+val compileAasmHostTest by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Compiles the native audio-activity state-machine host unit tests."
+
+    val testSource = file("src/test/cpp/audio_activity_state_machine_test.cpp")
+    inputs.file(testSource)
+    inputs.file("src/main/cpp/audio_activity_state_machine.h")
+    outputs.file(aasmTestBinary)
+
+    doFirst { vadTestOutputDir.get().asFile.mkdirs() }
+    commandLine(
+        hostCxx, "-std=c++17", "-Wall", "-Wextra",
+        "-I", file("src/main/cpp").absolutePath,
+        testSource.absolutePath,
+        "-o", aasmTestBinary.get().asFile.absolutePath
+    )
+}
+
+val aasmHostTest by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Runs the native audio-activity state-machine host unit tests."
+    dependsOn(compileAasmHostTest)
+    commandLine(aasmTestBinary.get().asFile.absolutePath)
+}
+
+// Run the native host tests as part of `check` (and therefore `build`).
 tasks.named("check") {
     dependsOn(vadHostTest)
+    dependsOn(aasmHostTest)
 }
