@@ -585,9 +585,6 @@ class VideoSessionManager @Inject constructor(
      * @param owner Lifecycle owner for camera binding
      */
     fun enableVideo(enabled: Boolean, owner: LifecycleOwner) {
-        // Keep the Top-N ranking aware of camera mute: a muted-mic/camera-on publisher ranks as
-        // baseline presence, while both-muted ranks lowest.
-        SharedVoiceActivityState.setVideoEnabled(enabled)
         if (enabled) {
             videoEncoderManager.activeInputSurface?.let { surface ->
                 videoEncoderManager.activeConfig?.let { config ->

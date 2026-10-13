@@ -45,9 +45,8 @@ enum class AudioActivityValue(val raw: Int) {
  * `-1`, which the transport treats as "no header" — so published objects are byte-for-byte
  * identical to the pre-Top-N behavior and there is no regression.
  *
- * Mute state also feeds the ranking (see [activityValueForSend]): a muted mic can't produce a
- * meaningful VAD value, so the publisher falls back to a presence rank based on whether the
- * camera is still on.
+ * Mute state also feeds the ranking (see [activityValueForSend]): a muted mic ranks the publisher
+ * lowest (speechEnd) so the relay lets it fall out of the top-N.
  */
 object SharedVoiceActivityState {
     private val value = AtomicInteger(AudioActivityValue.SPEECH_END.raw)
@@ -55,13 +54,10 @@ object SharedVoiceActivityState {
     @Volatile
     private var enabled = false
 
-    // Mic/camera mute state, mirrored from the call controls. Both default to on, matching the
-    // app's initial state (mic + camera enabled at session start).
+    // Microphone mute state, mirrored from the call controls. Defaults to on (mic enabled at
+    // session start). A muted mic makes [activityValueForSend] return speechEnd (lowest rank).
     @Volatile
     private var micEnabled = true
-
-    @Volatile
-    private var videoEnabled = true
 
     // One-shot request for the video publisher to emit an IDR. Set on a mute->unmute transition so
     // that when the relay swaps us back into the top-N (we now rank as speaking) the subscriber
@@ -89,11 +85,6 @@ object SharedVoiceActivityState {
     /** Returns and clears the one-shot keyframe request (video framer calls this per frame). */
     fun consumePendingVideoKeyframe(): Boolean = pendingVideoKeyframe.getAndSet(false)
 
-    /** Mirrors the camera mute state (true == on). Driven by the video toggle. */
-    fun setVideoEnabled(isEnabled: Boolean) {
-        videoEnabled = isEnabled
-    }
-
     /** Records the latest voice-activity value (called from the native state-machine callback). */
     fun post(rawValue: Int) {
         value.set(rawValue)
@@ -106,27 +97,20 @@ object SharedVoiceActivityState {
 
     /**
      * The value to stamp on an outgoing object. When Top-N is disabled, returns `-1` ("no header").
-     * When enabled, the value depends on mute state:
-     * - mic unmuted → the live 3-value VAD state ([latest]), as before;
-     * - mic muted but camera on → [AudioActivityValue.CONTINUOUS_SPEECH] (`1`), a baseline presence
-     *   rank so a silent-but-visible participant keeps a reasonable spot in the top-N;
-     * - mic and camera both muted → [AudioActivityValue.SPEECH_END] (`0`), the lowest rank so the
-     *   relay lets this publisher fall out of the top-N.
+     * When enabled:
+     * - mic unmuted → the live 3-value VAD state ([latest]);
+     * - mic muted (regardless of camera) → [AudioActivityValue.SPEECH_END] (`0`), the lowest rank
+     *   so the relay lets this publisher fall out of the top-N.
      */
     fun activityValueForSend(): Int {
         if (!enabled) return -1
-        return when {
-            micEnabled -> value.get()
-            videoEnabled -> AudioActivityValue.CONTINUOUS_SPEECH.raw
-            else -> AudioActivityValue.SPEECH_END.raw
-        }
+        return if (micEnabled) value.get() else AudioActivityValue.SPEECH_END.raw
     }
 
     /** Resets to the idle state (e.g. between sessions). */
     fun reset() {
         value.set(AudioActivityValue.SPEECH_END.raw)
         micEnabled = true
-        videoEnabled = true
         pendingVideoKeyframe.set(false)
     }
 }

@@ -28,7 +28,6 @@ class SharedVoiceActivityStateTest {
     fun `mic unmuted follows the live vad value`() {
         SharedVoiceActivityState.setEnabled(true)
         SharedVoiceActivityState.setMicEnabled(true)
-        SharedVoiceActivityState.setVideoEnabled(true)
         SharedVoiceActivityState.post(AudioActivityValue.SPEECH_START)
         assertEquals(
             AudioActivityValue.SPEECH_START.raw,
@@ -37,35 +36,11 @@ class SharedVoiceActivityStateTest {
     }
 
     @Test
-    fun `mic unmuted ignores mute fallback even when video is off`() {
-        SharedVoiceActivityState.setEnabled(true)
-        SharedVoiceActivityState.setMicEnabled(true)
-        SharedVoiceActivityState.setVideoEnabled(false)
-        SharedVoiceActivityState.post(AudioActivityValue.SPEECH_START)
-        assertEquals(
-            AudioActivityValue.SPEECH_START.raw,
-            SharedVoiceActivityState.activityValueForSend()
-        )
-    }
-
-    @Test
-    fun `mic muted but video on sends continuous speech presence rank`() {
+    fun `mic muted sends speech end regardless of camera`() {
+        // Muted mic -> speechEnd (0), even with the camera on (no presence-rank fallback).
         SharedVoiceActivityState.setEnabled(true)
         SharedVoiceActivityState.setMicEnabled(false)
-        SharedVoiceActivityState.setVideoEnabled(true)
         // A stale live value must not leak through while muted.
-        SharedVoiceActivityState.post(AudioActivityValue.SPEECH_START)
-        assertEquals(
-            AudioActivityValue.CONTINUOUS_SPEECH.raw,
-            SharedVoiceActivityState.activityValueForSend()
-        )
-    }
-
-    @Test
-    fun `mic and video both muted sends speech end`() {
-        SharedVoiceActivityState.setEnabled(true)
-        SharedVoiceActivityState.setMicEnabled(false)
-        SharedVoiceActivityState.setVideoEnabled(false)
         SharedVoiceActivityState.post(AudioActivityValue.SPEECH_START)
         assertEquals(
             AudioActivityValue.SPEECH_END.raw,
@@ -77,7 +52,6 @@ class SharedVoiceActivityStateTest {
     fun `mute state is ignored when top-n disabled`() {
         SharedVoiceActivityState.setEnabled(false)
         SharedVoiceActivityState.setMicEnabled(false)
-        SharedVoiceActivityState.setVideoEnabled(true)
         assertEquals(-1, SharedVoiceActivityState.activityValueForSend())
     }
 
@@ -116,10 +90,9 @@ class SharedVoiceActivityStateTest {
     }
 
     @Test
-    fun `reset restores mic and video to enabled`() {
+    fun `reset restores mic to enabled`() {
         SharedVoiceActivityState.setEnabled(true)
         SharedVoiceActivityState.setMicEnabled(false)
-        SharedVoiceActivityState.setVideoEnabled(false)
         SharedVoiceActivityState.reset()
         // After reset, an unmuted mic path is assumed: value falls back to the live (idle) value.
         assertEquals(
