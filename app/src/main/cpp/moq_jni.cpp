@@ -214,6 +214,9 @@ public:
                                       false) // not publisher-initiated
       , callback_ref_(callback_ref)
     {
+        // Allow this subscription to send MoQT new-group (keyframe) requests to the relay. Used on
+        // a Top-N swap-in when we join a track mid-group (see ObjectReceived).
+        SupportNewGroupRequest(true);
         LOGI("Created AndroidSubscribeTrackHandler");
     }
 
@@ -237,6 +240,28 @@ public:
         }
         track_name_str += "/";
         track_name_str += std::string(ftn.name.begin(), ftn.name.end());
+
+        // Top-N swap-in keyframe request: when the relay starts forwarding this VIDEO track to us
+        // mid-group — i.e. the first object after (re)entry has object_id > 0 — we've missed the
+        // group's keyframe, so the decoder can't start. Ask the relay/publisher for a new group
+        // (IDR) now instead of waiting up to a full keyframe interval. A forwarding gap (relay
+        // swapped us out then back in) or a fresh subscription both count as (re)entry.
+        if (track_name_str.find("video") != std::string::npos) {
+            const int64_t now_ms = steady_now_ms();
+            if (now_ms - last_object_ms_ > kForwardingGapMs) {
+                seen_group_start_ = false;      // (re)entry: relay just started forwarding to us
+                requested_new_group_ = false;
+            }
+            last_object_ms_ = now_ms;
+            if (hdr.object_id == 0) {
+                seen_group_start_ = true;       // clean group start — nothing to request
+            } else if (!seen_group_start_ && !requested_new_group_) {
+                LOGI("Top-N swap-in mid-group (obj=%llu) for %s: requesting new group (keyframe)",
+                     (unsigned long long)hdr.object_id, track_name_str.c_str());
+                RequestNewGroup();              // libquicr: SUBSCRIBE_UPDATE new-group request
+                requested_new_group_ = true;
+            }
+        }
 
         // Unwrap LOC container
         LocUnwrapResult locResult = LocWrapper::unwrap(data.data(), data.size());
@@ -367,6 +392,13 @@ public:
 
 private:
     jobject callback_ref_;
+
+    // Swap-in keyframe-request state (video). A forwarding gap longer than this is treated as a
+    // (re)entry — the relay started forwarding this track to us (Top-N swap-in or fresh subscribe).
+    static constexpr int64_t kForwardingGapMs = 500;
+    bool seen_group_start_ = false;     // have we seen object_id==0 (group start) since entry?
+    bool requested_new_group_ = false;  // have we already asked for a new group this entry?
+    int64_t last_object_ms_ = 0;        // monotonic time of the last received object
 };
 
 //==============================================================================
