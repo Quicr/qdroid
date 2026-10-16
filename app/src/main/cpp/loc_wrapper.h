@@ -25,6 +25,14 @@ struct LocMetadata {
     uint32_t objectId;
     bool isKeyframe;  // For video only
     uint64_t captureTimestampUs;  // Microseconds since epoch
+
+    // True when a LOC video_frame_marking property (id 4) was actually present and parsed on
+    // unwrap. When false, isKeyframe is not authoritative and the caller should fall back to a
+    // transport-level signal (e.g. MoQ object_id == 0 == group start). This is required for
+    // interop with publishers that carry no LOC public properties in the object payload (they put
+    // media directly in the payload and metadata in MoQ extensions) — see LocWrapper::unwrap.
+    bool frameMarkingPresent;  // For video only; set by unwrap
+    uint64_t timescale;        // LOC timescale (property id 8), 0 if absent
 };
 
 /**
@@ -43,7 +51,19 @@ struct LocUnwrapResult {
 class LocWrapper {
 public:
     /**
-     * Wrap codec data with LOC container
+     * Wrap codec data with a LOC container (public properties concatenated ahead of the payload).
+     *
+     * ⚠️ UNUSED as of the Mac interop work — kept intentionally as documentation of the legacy
+     * "LOC-in-payload" framing and as a utility. The publish path (moq_jni.cpp nativeSendObject) no
+     * longer LOC-wraps outgoing objects: to interop with the reference Mac client it now sends a
+     * clean media payload (video converted Annex-B→AVCC, audio verbatim) and carries metadata in MoQ
+     * object extensions (id 2 = timestamp, id 12 = activity) instead of a payload prefix. Prepending
+     * these LOC property bytes corrupted the bitstream the Mac fed to its decoder.
+     *
+     * The receive counterpart, unwrap(), is still used: it tolerantly strips a LOC property prefix
+     * if a peer sends one, and passes clean payloads through untouched.
+     *
+     * If a future track type needs LOC-in-payload packaging again, re-wire this into nativeSendObject.
      *
      * @param codecData Raw H.264 or Opus data
      * @param dataLen Size of codec data

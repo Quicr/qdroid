@@ -33,6 +33,11 @@ JavaVM* g_jvm = nullptr;
 // AppHeaders.AUDIO_ACTIVITY_INDICATOR constant.
 static constexpr uint64_t AUDIO_ACTIVITY_INDICATOR = 12;
 
+// Per-object MoQ extension id carrying the capture timestamp (8-byte little-endian microseconds),
+// matching the reference Mac client. Receivers use it to schedule/render frames; a missing
+// timestamp makes a receiver's jitter buffer treat every frame as ts 0 and drop them.
+static constexpr uint64_t MEDIA_TIMESTAMP = 2;
+
 // Per received VIDEO track (keyed by full track name): the latest Top-N voice-activity value
 // (0/1/2, -1 if no header seen) and the monotonic time of the last object received. Written on the
 // transport thread in ObjectReceived; read by Kotlin via nativeGetTrackActivity / nativeGetTrackIdleMs
@@ -300,9 +305,15 @@ public:
             }
             auto& manager = VideoJitterBufferManager::getInstance();
             if (auto* buffer = manager.getBuffer(track_name_str)) {
-                // Video frame goes directly to jitter buffer (C++ optimization)
-                // Use LOC metadata if available, otherwise derive from MoQ headers
-                bool isKeyframe = locResult.success ?
+                // Video frame goes directly to jitter buffer (C++ optimization).
+                // Keyframe detection: prefer the LOC video_frame_marking property when the
+                // publisher actually stamped one (QDroid's own stream). When it's absent — e.g. a
+                // native MoQ publisher that sends raw AVCC in the payload and carries metadata in
+                // MoQ extensions — fall back to the transport signal (object_id == 0 == group
+                // start == IDR). Without this fallback such streams never present a keyframe to the
+                // Kairos arbiter (skipOnlyToKeyframe), so it never anchors a group and output stays
+                // 0 (black remote tile).
+                bool isKeyframe = locResult.metadata.frameMarkingPresent ?
                     locResult.metadata.isKeyframe : (hdr.object_id == 0);
                 buffer->addFrame(hdr.group_id, hdr.object_id,
                                payload_data, payload_size, isKeyframe);
@@ -890,6 +901,55 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeUnpublish(JNIEnv *env, jobject
     }
 }
 
+namespace {
+
+// Interop (QDroid -> Mac), step 2: convert an Annex-B H.264 access unit (NALs delimited by
+// 00 00 01 / 00 00 00 01 start codes, as produced by the Android MediaCodec AVC encoder) to AVCC
+// (each NAL prefixed with a 4-byte big-endian length). The reference Mac client publishes AVCC, so
+// its decoder expects length-prefixed NALs; fed start codes it produces no picture (black tile).
+//
+// Emulation-prevention guarantees 00 00 01 never appears inside a NAL's RBSP, so scanning for start
+// codes reliably finds NAL boundaries. If no start code is found the input is already length-
+// prefixed (or not H.264) and is returned unchanged.
+[[nodiscard]] std::vector<uint8_t> annexBToAvcc(const uint8_t* data, size_t len) {
+    auto findStartCode = [&](size_t pos, size_t& scLen) -> size_t {
+        for (size_t p = pos; p + 3 <= len; ++p) {
+            if (data[p] == 0 && data[p + 1] == 0) {
+                if (data[p + 2] == 1) { scLen = 3; return p; }
+                if (p + 4 <= len && data[p + 2] == 0 && data[p + 3] == 1) { scLen = 4; return p; }
+            }
+        }
+        return len;  // no start code
+    };
+
+    size_t scLen = 0;
+    size_t firstSc = findStartCode(0, scLen);
+    if (firstSc == len) {
+        return std::vector<uint8_t>(data, data + len);  // not Annex-B; pass through
+    }
+
+    std::vector<uint8_t> out;
+    out.reserve(len + 8);
+    size_t nalStart = firstSc + scLen;
+    while (nalStart < len) {
+        size_t nextScLen = 0;
+        size_t nalEnd = findStartCode(nalStart, nextScLen);  // exclusive end of this NAL
+        size_t nalSize = nalEnd - nalStart;
+        if (nalSize > 0) {
+            out.push_back(static_cast<uint8_t>((nalSize >> 24) & 0xFF));
+            out.push_back(static_cast<uint8_t>((nalSize >> 16) & 0xFF));
+            out.push_back(static_cast<uint8_t>((nalSize >> 8) & 0xFF));
+            out.push_back(static_cast<uint8_t>(nalSize & 0xFF));
+            out.insert(out.end(), data + nalStart, data + nalEnd);
+        }
+        if (nalEnd == len) break;
+        nalStart = nalEnd + nextScLen;
+    }
+    return out;
+}
+
+}  // namespace
+
 extern "C"
 JNIEXPORT void JNICALL
 Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobject thiz, jlong ptr,
@@ -926,33 +986,28 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
     }
 
 
-    // Prepare LOC metadata
-    LocMetadata locMeta;
-    locMeta.groupId = static_cast<uint64_t>(group_id);
-    locMeta.objectId = static_cast<uint32_t>(object_id);
-    locMeta.captureTimestampUs = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::system_clock::now().time_since_epoch()
-    ).count();
-
-    // Determine media type from track name
+    // Interop (QDroid -> Mac), step 1: send a CLEAN media payload (no LOC container prefix).
+    //
+    // QDroid previously prepended LOC public properties (timestamp + video_frame_marking, ~11 bytes
+    // on video / ~9 on audio) to every object payload. The reference Mac client sends a raw media
+    // payload and carries metadata in MoQ extensions, so our LOC prefix corrupted the bitstream the
+    // Mac fed to its decoder. We now publish the encoder output verbatim.
+    //
+    // QDroid <-> QDroid is preserved: the receive path falls back to object_id == 0 for keyframe
+    // detection when no LOC frame_marking is present (see ObjectReceived), and the codec payload is
+    // still Annex-B, which feedFrame()/VideoDecoder decode directly.
+    //
+    // Step 2: for video, convert the encoder's Annex-B output to AVCC (length-prefixed NALs) so the
+    // Mac's decoder can decode it. Audio (Opus) is published verbatim.
+    std::vector<uint8_t> avccData;
+    const uint8_t* send_ptr = data;
+    size_t send_len = payload_size;
     if (name.find("video") != std::string::npos) {
-        locMeta.mediaType = MediaType::Video;
-        locMeta.isKeyframe = (object_id == 0);  // Object 0 is keyframe
-    } else if (name.find("audio") != std::string::npos) {
-        locMeta.mediaType = MediaType::Audio;
-        locMeta.isKeyframe = false;
-    } else {
-        // Default to video
-        locMeta.mediaType = MediaType::Video;
-        locMeta.isKeyframe = false;
+        avccData = annexBToAvcc(data, payload_size);
+        send_ptr = avccData.data();
+        send_len = avccData.size();
     }
 
-    // Wrap codec data with LOC
-    std::vector<uint8_t> locWrappedData = LocWrapper::wrap(data, payload_size, locMeta);
-    if (locWrappedData.empty()) {
-        LOGE("nativeSendObject: Failed to wrap data with LOC");
-        return;
-    }
     std::optional<uint16_t> ttl_opt;
 
     if (delivery_timeout_ms > 0) {
@@ -963,7 +1018,7 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
         .group_id = static_cast<uint64_t>(group_id),
         .object_id = static_cast<uint64_t>(object_id),
         .subgroup_id = 0,
-        .payload_length = static_cast<uint64_t>(locWrappedData.size()),  // Use LOC-wrapped size
+        .payload_length = static_cast<uint64_t>(send_len),  // media payload (video: AVCC)
         .status = quicr::ObjectStatus::kAvailable,
         .priority = static_cast<uint8_t>(priority),
         .ttl = ttl_opt,
@@ -972,17 +1027,29 @@ Java_com_cisco_quadroid_transport_MoqNative_nativeSendObject(JNIEnv *env, jobjec
         .immutable_extensions = std::nullopt
     };
 
-    // Top-N: stamp the current 3-value voice-activity state as a per-object MoQ extension
-    // header so the relay can rank this publisher. activity_value < 0 means "no header"
-    // (Top-N disabled) — the object is then byte-for-byte identical to the legacy path.
-    if (activity_value >= 0) {
-        quicr::Extensions extensions;
-        extensions[AUDIO_ACTIVITY_INDICATOR] = { { static_cast<uint8_t>(activity_value) } };
-        headers.extensions = std::move(extensions);
+    // Interop (QDroid -> Mac), step 3: carry metadata in MoQ extensions like the reference client.
+    // The timestamp used to live in the LOC prefix we removed in step 1; re-add it as extension
+    // id 2 (8-byte little-endian microseconds) so the Mac can schedule/render frames.
+    uint64_t captureTimestampUs = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    quicr::Extensions extensions;
+    {
+        std::vector<uint8_t> tsBytes(8);
+        for (int i = 0; i < 8; ++i) {
+            tsBytes[i] = static_cast<uint8_t>((captureTimestampUs >> (8 * i)) & 0xFF);  // little-endian
+        }
+        extensions[MEDIA_TIMESTAMP] = { std::move(tsBytes) };
     }
+    // Top-N: stamp the 3-value voice-activity state so the relay can rank this publisher.
+    // activity_value < 0 means "no header" (Top-N disabled).
+    if (activity_value >= 0) {
+        extensions[AUDIO_ACTIVITY_INDICATOR] = { { static_cast<uint8_t>(activity_value) } };
+    }
+    headers.extensions = std::move(extensions);
 
     try {
-        quicr::BytesSpan data_span(locWrappedData.data(), locWrappedData.size());  // Use LOC-wrapped data
+        quicr::BytesSpan data_span(send_ptr, send_len);  // media payload (video: AVCC, no LOC)
         auto status = handler->PublishObject(headers, data_span);
 
         if (status != quicr::PublishTrackHandler::PublishObjectStatus::kOk) {
